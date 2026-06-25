@@ -51,6 +51,10 @@ jobs:
           sha256sum opentine_tui-* > SHA256SUMS
 
       - name: Attest build provenance
+        # Build provenance attestation requires a public repository (or GitHub
+        # org/enterprise with the feature enabled). Skip it on private repos so the
+        # release still publishes; it runs automatically once the repo is public.
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/opentine_tui-*
