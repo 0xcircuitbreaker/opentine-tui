@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from textual.widgets import Tree
+import json
+from dataclasses import dataclass
+from typing import Any
 
 from opentine.core import Run, StepKind
+from rich.markup import escape
+from textual.message import Message
+from textual.widgets import Tree
 
 STEP_ICONS = {
     StepKind.think: "*",
@@ -23,13 +28,42 @@ STEP_COLORS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class StepNodeData:
+    run_id: str
+    step_id: str
+
+
+class StepSelected(Message):
+    def __init__(self, run_id: str, step_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+        self.step_id = step_id
+
+
+def _display_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, sort_keys=True)
+    except TypeError:
+        return repr(value)
+
+
 class StepTree(Tree):
     def __init__(self) -> None:
         super().__init__("Select a run")
+        self._run: Run | None = None
+
+    def clear_run(self, label: str = "Select a run") -> None:
+        self._run = None
+        self.clear()
+        self.root.set_label(label)
 
     def load_run(self, run: Run) -> None:
+        self._run = run
         self.clear()
-        self.root.set_label(f"[bold]{run.id}[/]  model=[dim]{run.model_info}[/]")
+        self.root.set_label(f"[bold]{escape(run.id)}[/]  model=[dim]{escape(run.model_info)}[/]")
 
         if not run.steps:
             self.root.add("[dim](no steps)[/]")
@@ -45,25 +79,45 @@ class StepTree(Tree):
             args = step.inputs.get("arguments", {})
 
             if step.kind == StepKind.tool:
-                args_str = ", ".join(
-                    f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}" for k, v in args.items()
+                if isinstance(args, dict):
+                    args_str = ", ".join(
+                        f'{escape(str(k))}="{escape(v)}"'
+                        if isinstance(v, str)
+                        else f"{escape(str(k))}={escape(_display_value(v))}"
+                        for k, v in args.items()
+                    )
+                else:
+                    args_str = escape(_display_value(args))
+                label = (
+                    f"[{color}]{icon}[/] [bold]tool[/]  {escape(_display_value(name))}({args_str})"
                 )
-                label = f"[{color}]{icon}[/] [bold]tool[/]  {name}({args_str})"
             elif text:
-                preview = text[:80].replace("\n", " ")
-                if len(text) > 80:
+                rendered_text = _display_value(text)
+                preview = rendered_text[:80].replace("\n", " ")
+                if len(rendered_text) > 80:
                     preview += "..."
-                label = f'[{color}]{icon}[/] [{color}]{step.kind.value}[/]  "{preview}"'
+                label = f'[{color}]{icon}[/] [{color}]{step.kind.value}[/]  "{escape(preview)}"'
             else:
-                label = f"[{color}]{icon}[/] [{color}]{step.kind.value}[/]  {step.id}"
+                label = (
+                    f"[{color}]{icon}[/] [{color}]{step.kind.value}[/]  "
+                    f"{getattr(step, 'short_id', step.id[:12])}"
+                )
 
             cost_str = f"  [dim]${step.cost:.4f}[/]" if step.cost > 0 else ""
             dur_str = f"  [dim]{step.duration:.1f}s[/]" if step.duration > 0 else ""
 
-            if step.parent_id and step.parent_id in nodes:
-                node = nodes[step.parent_id].add(label + cost_str + dur_str)
+            data = StepNodeData(run.id, step.id)
+            parent_id = getattr(step, "parent_id", None)
+            if parent_id and parent_id in nodes:
+                node = nodes[parent_id].add(label + cost_str + dur_str, data=data)
             else:
-                node = self.root.add(label + cost_str + dur_str)
+                node = self.root.add(label + cost_str + dur_str, data=data)
             nodes[step.id] = node
 
         self.root.expand()
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if isinstance(data, StepNodeData):
+            event.stop()
+            self.post_message(StepSelected(data.run_id, data.step_id))
