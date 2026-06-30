@@ -1,6 +1,6 @@
 [project]
 name = "opentine-tui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Terminal dashboard for opentine — visual management console with Textual"
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,13 +20,16 @@ classifiers = [
     "Topic :: Software Development :: User Interfaces",
 ]
 dependencies = [
-    # 0.1.1 is the first opentine release that ships the harness integration layer
-    # (opentine.harnesses) the dashboard depends on.
-    "opentine>=0.1.1,<0.2",
+    # 0.2.0 ships .tine format v2: migration, tags+search/index, cost+budget,
+    # autosave/drafts, signing (tine-sig/1), and field-level diff — all surfaced
+    # by this dashboard.
+    "opentine>=0.2,<0.3",
     "textual>=3.0",
 ]
 
 [project.optional-dependencies]
+# Ed25519 signing/keygen in the dashboard (HMAC-SHA256 works without it).
+crypto = ["opentine[crypto]>=0.2,<0.3"]
 dev = [
     "build>=1.2",
     "pytest>=9.0",

@@ -11,19 +11,44 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Static
 
-from opentine_tui.actions import ActionResult, HarnessOptions, RunActionService
-from opentine_tui.dialogs import ConfirmationModal, HarnessOptionsModal, TextInputModal
-from opentine_tui.repository import RunRecord, RunRepository
+from opentine_tui.actions import (
+    FORMAT_VERSION,
+    ActionResult,
+    HarnessOptions,
+    RunActionService,
+)
+from opentine_tui.dialogs import (
+    BudgetModal,
+    ConfirmationModal,
+    HarnessOptionsModal,
+    MigrateModal,
+    SignModal,
+    TagEditorModal,
+    TextInputModal,
+    VerifyKeyModal,
+)
+from opentine_tui.repository import RunRecord, RunRepository, filter_records
 from opentine_tui.widgets.run_list import RunList, RunSelected
 from opentine_tui.widgets.step_detail import StepDetail
 from opentine_tui.widgets.step_tree import StepSelected, StepTree
 
 BRAND = "#FF6900"
+
+
+def _escape_markup(text: str) -> str:
+    """Neutralize Textual console markup in dynamic text.
+
+    Replaces every ``[`` so user-supplied search queries / DSL error text can be
+    interpolated into a markup string without raising MarkupError (rich/textual
+    ``escape`` leaves a dangling ``[`` untouched, which still crashes).
+    """
+    return str(text).replace("[", r"\[")
 
 
 class OpentineTUI(App):
@@ -36,8 +61,8 @@ class OpentineTUI(App):
     }
     #left-panel {
         width: 1fr;
-        min-width: 24;
-        max-width: 34;
+        min-width: 32;
+        max-width: 64;
         border-right: solid #FF6900;
     }
     #center-panel {
@@ -56,19 +81,30 @@ class OpentineTUI(App):
         padding-left: 1;
     }
     RunList,
-    StepTree,
-    StepDetail {
+    StepTree {
         height: 1fr;
+    }
+    #detail-scroll {
+        height: 1fr;
+    }
+    StepDetail {
+        height: auto;
     }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("slash", "search", "Search"),
         Binding("1", "focus_left", "Runs", show=False),
         Binding("2", "focus_center", "Steps", show=False),
         Binding("3", "focus_right", "Detail", show=False),
         Binding("v", "verify", "Verify"),
+        Binding("t", "tag", "Tags"),
+        Binding("b", "budget", "Budget", show=False),
+        Binding("m", "migrate", "Migrate", show=False),
+        Binding("s", "sign", "Sign", show=False),
+        Binding("k", "keygen", "Keygen", show=False),
         Binding("f", "fork", "Fork", show=False),
         Binding("c", "cache_replay", "Cache replay", show=False),
         Binding("d", "diff", "Diff", show=False),
@@ -86,8 +122,10 @@ class OpentineTUI(App):
         self.repository = RunRepository(runs_dir)
         self.actions = RunActionService(self.repository)
         self._records: list[RunRecord] = []
+        self._all_records: list[RunRecord] = []
         self._selected_record: RunRecord | None = None
         self._selected_step_id: str | None = None
+        self._query: str = ""
         self._refresh_timer = None
 
     def compose(self) -> ComposeResult:
@@ -101,7 +139,8 @@ class OpentineTUI(App):
                 yield StepTree()
             with Vertical(id="right-panel"):
                 yield Static("[bold #FF6900]Details[/]", id="detail-title")
-                yield StepDetail()
+                with VerticalScroll(id="detail-scroll"):
+                    yield StepDetail()
         yield Footer()
 
     def on_mount(self) -> None:
@@ -145,8 +184,10 @@ class OpentineTUI(App):
 
     def _refresh(self) -> None:
         selected_key = self._selected_record.key if self._selected_record else None
-        self._records = self.repository.list_records()
+        self._all_records = self.repository.list_records()
+        self._records, error = filter_records(self._all_records, self._query)
         self.query_one(RunList).update_records(self._records)
+        self._update_runs_title(error)
 
         if selected_key:
             replacement = next(
@@ -156,7 +197,35 @@ class OpentineTUI(App):
             if replacement:
                 self._selected_record = replacement
 
+    def _update_runs_title(self, error: str | None = None) -> None:
+        title = "[bold #FF6900]Runs[/]"
+        if error:
+            title += f"  [red]{_escape_markup(error)}[/]"
+        elif self._query:
+            title += (
+                f"  [dim]filter:[/] {_escape_markup(self._query)} [dim]({len(self._records)})[/]"
+            )
+        widget = self.query_one("#runs-title", Static)
+        try:
+            widget.update(title)
+        except Exception:  # a panel title must never crash the dashboard
+            widget.update("Runs")
+
     def action_refresh(self) -> None:
+        self._refresh()
+
+    @work
+    async def action_search(self) -> None:
+        value = await self.push_screen_wait(
+            TextInputModal(
+                "Search / filter runs",
+                "tag:x model:y status:done cost:>0.01 after:2026-01-01 free text",
+                value=self._query,
+            )
+        )
+        if value is None:  # cancelled — leave the active filter unchanged
+            return
+        self._query = value  # empty string clears the filter
         self._refresh()
 
     def action_focus_left(self) -> None:
@@ -166,14 +235,113 @@ class OpentineTUI(App):
         self.query_one(StepTree).focus()
 
     def action_focus_right(self) -> None:
-        self.query_one(StepDetail).focus()
+        # focus the scroll container (the Static itself is not focusable/scrollable)
+        self.query_one("#detail-scroll").focus()
 
-    def action_verify(self) -> None:
+    @work
+    async def action_verify(self) -> None:
         record = self._require_selected()
         if record is None:
             return
-        self._show_result(self.actions.verify(record.path))
+        integrity = self.actions.verify(record.path)
+        if record.has_signature:
+            options = await self.push_screen_wait(VerifyKeyModal())
+            if options is not None:
+                signature = self.actions.verify_signature(record, options)
+                self._show_result(
+                    ActionResult(
+                        integrity.ok and signature.ok,
+                        "Verify",
+                        f"{integrity.message}\n\n[signature]\n{signature.message}",
+                        path=record.path,
+                    )
+                )
+                return
+            # signed, but the user skipped the key — don't imply the signature passed
+            self._show_result(
+                ActionResult(
+                    integrity.ok,
+                    "Integrity OK — signature NOT verified" if integrity.ok else "Verify failed",
+                    f"{integrity.message}\n\nsignature present but not verified (no key supplied)",
+                    path=record.path,
+                )
+            )
+            return
+        self._show_result(integrity)
 
+    @work
+    async def action_tag(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        result = await self.push_screen_wait(TagEditorModal(record.run.tags))
+        if not result:
+            return
+        self._show_result(self.actions.set_tags(record, result["add"], result["remove"]))
+
+    @work
+    async def action_budget(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        current = record.run.budget() if hasattr(record.run, "budget") else None
+        options = await self.push_screen_wait(BudgetModal(current))
+        if options is None:
+            return
+        if not await self._confirm(
+            "Set budget",
+            "This rewrites the integrity digest (and invalidates any signature).",
+        ):
+            return
+        self._show_result(self.actions.set_budget(record, options))
+
+    @work
+    async def action_migrate(self) -> None:
+        record = self._require_selected()
+        if record is None:
+            return
+        if record.run is None or record.is_future:
+            self._show_result(self.actions.migrate(record))
+            return
+        if record.on_disk_version is not None and record.on_disk_version >= FORMAT_VERSION:
+            self._show_result(self.actions.migrate(record))
+            return
+        result = await self.push_screen_wait(
+            MigrateModal(
+                version_label=record.version_label,
+                has_signature=record.has_signature,
+                integrity_ok=bool(record.integrity and record.integrity.ok),
+                is_legacy=record.is_legacy,
+            )
+        )
+        if result is None:
+            return
+        self._show_result(self.actions.migrate(record, force=result.get("force", False)))
+
+    @work
+    async def action_sign(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        options = await self.push_screen_wait(SignModal())
+        if options is None:
+            return
+        self._show_result(self.actions.sign(record, options))
+
+    @work
+    async def action_keygen(self) -> None:
+        out = await self.push_screen_wait(
+            TextInputModal(
+                "Generate ed25519 keypair",
+                "path for private seed",
+                value="opentine_ed25519.key",
+            )
+        )
+        if not out:
+            return
+        self._show_result(self.actions.keygen(out))
+
+    @work
     async def action_fork(self) -> None:
         record = self._require_loaded()
         if record is None:
@@ -185,6 +353,7 @@ class OpentineTUI(App):
             return
         self._show_result(self.actions.fork(record.run, self._selected_step_id))
 
+    @work
     async def action_cache_replay(self) -> None:
         record = self._require_loaded()
         if record is None:
@@ -196,6 +365,7 @@ class OpentineTUI(App):
             return
         self._show_result(self.actions.cache_replay(record.run, self._selected_step_id))
 
+    @work
     async def action_diff(self) -> None:
         record = self._require_loaded()
         if record is None:
@@ -207,6 +377,7 @@ class OpentineTUI(App):
             return
         self._show_result(self.actions.diff(record.run, other))
 
+    @work
     async def action_resume(self) -> None:
         record = self._require_loaded()
         if record is None:
@@ -221,6 +392,7 @@ class OpentineTUI(App):
             return
         self._show_result(self.actions.resume(record.run, record.path))
 
+    @work
     async def action_launch_harness(self) -> None:
         options = await self._request_harness_options("Run harness")
         if options is None:
@@ -232,6 +404,7 @@ class OpentineTUI(App):
             return
         self._show_result(await self._run_in_thread(self.actions.run_harness, options))
 
+    @work
     async def action_fork_harness(self) -> None:
         record = self._require_loaded()
         if record is None:
@@ -252,6 +425,7 @@ class OpentineTUI(App):
         )
         self._show_result(result)
 
+    @work
     async def action_replay_harness(self) -> None:
         record = self._require_loaded()
         if record is None:

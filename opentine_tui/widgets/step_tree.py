@@ -105,13 +105,17 @@ class StepTree(Tree):
 
             cost_str = f"  [dim]${step.cost:.4f}[/]" if step.cost > 0 else ""
             dur_str = f"  [dim]{step.duration:.1f}s[/]" if step.duration > 0 else ""
+            usage = getattr(step, "usage", {}) or {}
+            tokens = int(usage.get("input", 0) or 0) + int(usage.get("output", 0) or 0)
+            tok_str = f"  [dim]{tokens}tok[/]" if tokens else ""
 
             data = StepNodeData(run.id, step.id)
             parent_id = getattr(step, "parent_id", None)
+            annotated = label + cost_str + tok_str + dur_str
             if parent_id and parent_id in nodes:
-                node = nodes[parent_id].add(label + cost_str + dur_str, data=data)
+                node = nodes[parent_id].add(annotated, data=data)
             else:
-                node = self.root.add(label + cost_str + dur_str, data=data)
+                node = self.root.add(annotated, data=data)
             nodes[step.id] = node
 
         self.root.expand()
