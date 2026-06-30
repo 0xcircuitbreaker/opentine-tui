@@ -7,10 +7,10 @@ Format-v2 migration, tags + search, cost + budget, autosave/drafts, signing
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
+from opentine._canon import _integrity_digest
 from opentine.core import Run, RunStatus, StepKind
 from textual.widgets import Input
 
@@ -32,7 +32,6 @@ try:
 except Exception:  # pragma: no cover
     HAS_ED25519 = False
 
-FIXTURES = Path(__file__).resolve().parents[2] / "opentine" / "tests" / "fixtures"
 HMAC_KEY = b"0123456789abcdef0123456789abcdef"  # 32 bytes
 
 
@@ -50,6 +49,44 @@ def _completed_run(
     return run
 
 
+def _write_v1(path: Path, run_id: str = "v1-run") -> Path:
+    """A valid on-disk v1 artifact (a v2 run with format_version downgraded and a
+    recomputed v1 digest). Generated in-test so CI does not need the opentine
+    source checkout. The 1->2 migration is additive, so this loads/migrates cleanly."""
+    _completed_run(run_id).save(path)  # v2
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["format_version"] = 1
+    raw.setdefault("metadata", {})["integrity"] = {
+        "algorithm": "sha256",
+        "digest": _integrity_digest(raw),
+    }
+    path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _write_legacy(path: Path, run_id: str = "legacy-run") -> Path:
+    """A 0.1.0 pre-versioned "linear" artifact (type==Run, flat steps, no graph)."""
+    data = {
+        "type": "Run",
+        "id": run_id,
+        "model_info": "mock-legacy",
+        "user_prompt": "p",
+        "status": "completed",
+        "steps": [
+            {
+                "id": "s1",
+                "kind": "think",
+                "inputs": {"text": "x"},
+                "outputs": {},
+                "parent_id": None,
+            },
+            {"id": "s2", "kind": "done", "inputs": {"text": "d"}, "outputs": {}, "parent_id": "s1"},
+        ],
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
 # --- repository: on-disk classification --------------------------------------
 
 
@@ -65,8 +102,7 @@ def test_record_detects_v2_native(tmp_path: Path):
 
 
 def test_record_detects_v1_needs_migration(tmp_path: Path):
-    dest = tmp_path / "v1.tine"
-    shutil.copy(FIXTURES / "golden_v1.tine", dest)
+    dest = _write_v1(tmp_path / "v1.tine")
     record = RunRepository(tmp_path).inspect_path(dest)
     assert record.on_disk_version == 1
     assert record.needs_migration
@@ -75,8 +111,7 @@ def test_record_detects_v1_needs_migration(tmp_path: Path):
 
 
 def test_record_detects_legacy_not_corrupt(tmp_path: Path):
-    dest = tmp_path / "legacy.tine"
-    shutil.copy(FIXTURES / "golden_v0_linear.tine", dest)
+    dest = _write_legacy(tmp_path / "legacy.tine")
     record = RunRepository(tmp_path).inspect_path(dest)
     assert record.is_legacy
     assert record.on_disk_version == 0
@@ -127,8 +162,7 @@ def test_filter_bad_query_reports_error_and_keeps_records(tmp_path: Path):
 def test_migrate_upgrades_v1_in_place(tmp_path: Path):
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
-    dest = tmp_path / "v1.tine"
-    shutil.copy(FIXTURES / "golden_v1.tine", dest)
+    dest = _write_v1(tmp_path / "v1.tine")
 
     result = service.migrate(repo.inspect_path(dest))
 
@@ -365,7 +399,7 @@ async def test_tag_keypress_round_trip(tmp_path: Path):
 async def test_migrate_keypress_round_trip(tmp_path: Path):
     runs_dir = tmp_path / ".tine_runs"
     runs_dir.mkdir()
-    shutil.copy(FIXTURES / "golden_v1.tine", runs_dir / "v1.tine")
+    _write_v1(runs_dir / "v1.tine")
     app = OpentineTUI(runs_dir=runs_dir)
 
     async with app.run_test() as pilot:
@@ -416,8 +450,7 @@ def test_set_tags_on_v1_does_not_migrate(tmp_path: Path):
     """A tag edit must not silently perform the one-way v1->v2 upgrade."""
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
-    dest = tmp_path / "v1.tine"
-    shutil.copy(FIXTURES / "golden_v1.tine", dest)
+    dest = _write_v1(tmp_path / "v1.tine")
     assert repo.inspect_path(dest).on_disk_version == 1
 
     result = service.set_tags(repo.inspect_path(dest), ["x"], [])
