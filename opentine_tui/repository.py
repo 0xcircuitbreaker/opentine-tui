@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,14 @@ except Exception:  # pragma: no cover - defensive
     atomic_write_text = None
 
 DEFAULT_RUNS_DIR = ".tine_runs"
+
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def safe_filename(value: str, fallback: str = "run") -> str:
+    """Reduce an untrusted id to a single, harmless path component."""
+    cleaned = _UNSAFE_NAME.sub("_", value or "").strip("._") or fallback
+    return cleaned[:120]
 
 
 def default_runs_dir() -> Path:
@@ -146,6 +155,10 @@ class RunRecord:
     tags: list[str] = field(default_factory=list)
     total_tokens: int = 0
     signature: Any | None = None
+    # The run's search-index entry, built once with the record. Deriving it per
+    # filter call re-walked every step of every run on the UI thread each time the
+    # user typed, or the poll ticked.
+    entry: Any | None = None
 
     @property
     def key(self) -> str:
@@ -235,16 +248,42 @@ class RunRepository:
 
     def __init__(self, runs_dir: str | Path | None = None) -> None:
         self.runs_dir = Path(runs_dir).expanduser() if runs_dir is not None else default_runs_dir()
+        # path -> ((mtime, size), record). Inspecting one artifact reads, verifies,
+        # signature-checks and loads it; at ~13ms each a 200-run directory costs
+        # ~2.6s, which the dashboard would otherwise pay on every poll.
+        self._cache: dict[Path, tuple[tuple[float, int], RunRecord]] = {}
+
+    def invalidate(self, path: str | Path | None = None) -> None:
+        """Drop cached inspection state (all of it, or one artifact)."""
+        if path is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(Path(path), None)
 
     def list_records(self) -> list[RunRecord]:
         if not self.runs_dir.exists():
+            self._cache.clear()
             return []
-        files = sorted(
-            self.runs_dir.glob("*.tine"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        return [self.inspect_path(path) for path in files]
+        stats: list[tuple[Path, os.stat_result]] = []
+        for path in self.runs_dir.glob("*.tine"):
+            try:
+                stats.append((path, path.stat()))
+            except OSError:  # vanished mid-scan
+                continue
+        stats.sort(key=lambda item: item[1].st_mtime, reverse=True)
+
+        records: list[RunRecord] = []
+        fresh: dict[Path, tuple[tuple[float, int], RunRecord]] = {}
+        for path, stat_result in stats:
+            fingerprint = (stat_result.st_mtime, stat_result.st_size)
+            cached = self._cache.get(path)
+            record = cached[1] if cached is not None and cached[0] == fingerprint else None
+            if record is None:
+                record = self.inspect_path(path)
+            fresh[path] = (fingerprint, record)
+            records.append(record)
+        self._cache = fresh  # drops entries for deleted files
+        return records
 
     def inspect_path(self, path: str | Path) -> RunRecord:
         run_path = Path(path)
@@ -272,6 +311,13 @@ class RunRepository:
                 signature=signature,
             )
 
+        entry = None
+        if entry_from_run is not None:
+            try:
+                entry = entry_from_run(run, run_path.name, mtime)
+            except Exception:  # pragma: no cover - an unindexable run still lists
+                entry = None
+
         return RunRecord(
             path=run_path,
             mtime=mtime,
@@ -282,6 +328,7 @@ class RunRepository:
             tags=list(getattr(run, "tags", []) or []),
             total_tokens=int(getattr(run, "total_tokens", 0) or 0),
             signature=signature,
+            entry=entry,
         )
 
     def find_path(self, ref: str | Path) -> Path:
@@ -312,10 +359,32 @@ class RunRepository:
         return Run.load(self.find_path(ref))
 
     def path_for_run(self, run: Run) -> Path:
-        return self.runs_dir / f"{run.id}.tine"
+        """Where a run is stored by default.
 
-    def save(self, run: Run, path: str | Path | None = None) -> Path:
+        A run id comes out of an artifact, which is data someone else may have
+        written; ``../../.ssh/authorized_keys`` is a legal string. The filename is
+        therefore built from a sanitized id, never from the raw one.
+        """
+        return self.runs_dir / f"{safe_filename(run.id)}.tine"
+
+    def save(self, run: Run, path: str | Path | None = None, *, overwrite: bool = True) -> Path:
+        """Persist ``run``. ``overwrite=False`` refuses to replace an existing file.
+
+        In-place edits (tag, budget, sign, migrate) want the default; anything that
+        creates a *new* artifact passes ``overwrite=False``, matching the CLI's
+        refusal to clobber a run without an explicit flag.
+        """
         out = Path(path).expanduser() if path is not None else self.path_for_run(run)
+        if out.is_dir():
+            # `Run.save` treats a directory holding config.json as a v3 repository
+            # target and writes objects into it. Every save from here means a
+            # portable file, so a directory is a mistake, not a mode switch.
+            raise IsADirectoryError(
+                f"{out} is a directory; give a .tine file path "
+                "(use 'i' to import into a repository)"
+            )
+        if not overwrite and out.exists():
+            raise FileExistsError(str(out))
         out.parent.mkdir(parents=True, exist_ok=True)
         return run.save(out)
 
@@ -345,7 +414,7 @@ class RunRepository:
         else:  # pragma: no cover - defensive fallback
             tmp = out.with_name(out.name + ".tmp")
             tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, out)
+            tmp.replace(out)
         return out
 
 
@@ -373,10 +442,15 @@ def filter_records(records: list[RunRecord], query: str) -> tuple[list[RunRecord
         if record.run is None:
             kept.append(record)  # keep corrupt rows visible while filtering
             continue
+        entry = record.entry
+        if entry is None:
+            # No index entry means the run could not be described, not that it
+            # matched: hiding it would be worse, so it stays visible and labelled.
+            kept.append(record)
+            continue
         try:
-            entry = entry_from_run(record.run, record.path.name, record.mtime)
             if match_entry(entry, parsed):
                 kept.append(record)
-        except Exception:  # pragma: no cover - defensive
-            kept.append(record)
+        except Exception as exc:  # pragma: no cover - defensive
+            return records, f"{type(exc).__name__}: {exc}"
     return kept, None

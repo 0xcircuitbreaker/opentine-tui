@@ -11,6 +11,7 @@ from typing import Any
 
 from opentine.core import Run, Step
 
+from opentine_tui.formatting import short_ref
 from opentine_tui.repository import RunRecord, RunRepository, verify_integrity
 
 try:
@@ -24,6 +25,11 @@ except Exception:  # pragma: no cover - defensive
     FORMAT_VERSION = 2
 
 try:
+    from opentine.redaction import redact_value
+except Exception:  # pragma: no cover - defensive
+    redact_value = None
+
+try:
     from opentine.migrations import LEGACY_VERSION
 except Exception:  # pragma: no cover - defensive
     LEGACY_VERSION = 0
@@ -33,7 +39,9 @@ try:
         ClaudeCodeHarness,
         CodexCLIHarness,
         CursorHarness,
+        GeminiCLIHarness,
         GenericHarness,
+        GrokBuildHarness,
         HermesHarness,
         KimiCodeHarness,
         OpenClawHarness,
@@ -49,7 +57,10 @@ else:
         "claude-code": ClaudeCodeHarness,
         "codex": CodexCLIHarness,
         "cursor": CursorHarness,
+        # 0.3.0 adds these two as table-driven presets (opentine.harnesses._presets).
+        "gemini": GeminiCLIHarness,
         "generic": GenericHarness,
+        "grok": GrokBuildHarness,
         "hermes": HermesHarness,
         "kimi-code": KimiCodeHarness,
         "openclaw": OpenClawHarness,
@@ -87,6 +98,9 @@ class BudgetOptions:
     max_duration: float | None = None
     max_usage: int | None = None
     on_breach: str = "stop"
+    # 0.3.0: treat a step opentine could not price as a cost breach, instead of
+    # letting an unpriced call slip under a cost ceiling as $0.
+    strict_cost: bool = False
 
 
 @dataclass(slots=True)
@@ -98,7 +112,8 @@ class SignOptions:
     key_id: str | None = None
     signer: str | None = None
     save_path: str | None = None
-    force: bool = False
+    force: bool = False  # sign despite a failed integrity check
+    overwrite: bool = False  # replace an existing destination file
 
 
 @dataclass(slots=True)
@@ -110,7 +125,36 @@ class VerifyKeyOptions:
 
 
 def short_id(value: str | None) -> str:
-    return (value or "")[:12]
+    """Abbreviate a run or step id, including v3 object ids."""
+    return short_ref(value)
+
+
+def _fork(run: Run, step_id: str, **kwargs: Any) -> Run:
+    """``run.fork`` that tolerates an opentine without the 0.4.0 fork-act options.
+
+    0.4.0 added ``intent=`` and ``nonce=`` and made a fork id identify the fork
+    *act*; on an older build those keywords do not exist and the old, coordinate-
+    derived id is the only behaviour available.
+    """
+    try:
+        return run.fork(step_id, **kwargs)
+    except TypeError:  # pragma: no cover - pre-0.4.0 opentine
+        return run.fork(step_id)
+
+
+def _redacts(tags: list[str]) -> bool:
+    """True when opentine's redactor would rewrite one of these tags on save.
+
+    Tags are written outside the digest by a raw JSON edit, so they survive
+    verbatim — until any other action re-saves the run through opentine, which
+    redacts credential-shaped strings anywhere in the document.
+    """
+    if redact_value is None:  # pragma: no cover - defensive
+        return False
+    try:
+        return list(redact_value(list(tags))) != list(tags)
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def _fail(title: str, message: str, path: str | Path | None = None) -> ActionResult:
@@ -286,7 +330,9 @@ class RunActionService:
         try:
             step_id = resolve_step_ref(run, step_ref)
             forked = run.fork(step_id)
-            path = self.repository.save(forked, save_path)
+            path = self.repository.save(forked, save_path, overwrite=False)
+        except FileExistsError as exc:
+            return _fail("Fork blocked", f"{exc} already exists; choose another save path.")
         except Exception as exc:
             return ActionResult(False, "Fork failed", str(exc))
 
@@ -310,14 +356,26 @@ class RunActionService:
     ) -> ActionResult:
         try:
             step_id = resolve_step_ref(run, step_ref)
-            replayed = run.fork(step_id, new_run_id=f"{run.id}-replay")
+            # A cached replay reuses recorded steps and produces nothing new, so it
+            # must be reproducible: `nonce=""` opts out of the 0.4.0 fork-act random
+            # nonce and yields one id per (run, step). Replaying twice then lands on
+            # the same artifact, where the overwrite refusal below is the guard.
+            # (A fixed `<id>-replay` name, which 0.3.0 used, silently destroyed the
+            # previous replay instead.)
+            # Must match what `tine replay --mode cache` passes (_cli_flow.py and
+            # _runtime_history.py both use exactly this): the intent digest is an
+            # input to the fork id, so a different intent lands the dashboard's
+            # replay on a different artifact than the CLI's for the same run+step.
+            replayed = _fork(run, step_id, intent={"replay": "cache"}, nonce="")
             replayed.metadata["replay"] = {
                 "mode": "cache",
                 "source_run": run.id,
                 "reused_steps": len(replayed.steps),
             }
             replayed.status = run.status
-            path = self.repository.save(replayed, save_path)
+            path = self.repository.save(replayed, save_path, overwrite=False)
+        except FileExistsError as exc:
+            return _fail("Replay blocked", f"{exc} already exists; choose another save path.")
         except Exception as exc:
             return ActionResult(False, "Replay failed", str(exc))
 
@@ -339,8 +397,18 @@ class RunActionService:
 
     # -- v0.2.0 actions ----------------------------------------------------
 
-    def migrate(self, record: RunRecord, force: bool = False) -> ActionResult:
-        """Upgrade a v1/legacy artifact to the current format (one-way)."""
+    def migrate(
+        self,
+        record: RunRecord,
+        force: bool = False,
+        save_path: str | Path | None = None,
+    ) -> ActionResult:
+        """Upgrade a v1/legacy artifact to the current format (one-way).
+
+        ``save_path`` writes the upgrade beside the original instead of over it,
+        which is what ``tine migrate --save`` does; an existing destination is
+        refused rather than replaced.
+        """
         path = record.path
         if record.is_future:
             return _fail(
@@ -359,9 +427,16 @@ class RunActionService:
                     "Source integrity check failed; re-run with Force.",
                     path,
                 )
+        destination = Path(save_path).expanduser() if save_path else path
+        if destination != path and destination.exists() and not force:
+            return _fail(
+                "Migrate blocked",
+                f"{destination} already exists; enable Force to replace it.",
+                path,
+            )
         try:
             run = Run.load(path)  # auto-migrates in memory
-            saved = self.repository.save(run, path)  # persists the upgrade
+            saved = self.repository.save(run, destination)  # persists the upgrade
         except Exception as exc:
             return _fail("Migrate failed", f"{type(exc).__name__}: {exc}", path)
         note = "\nSignature was dropped — re-sign with 's'." if record.has_signature else ""
@@ -380,6 +455,7 @@ class RunActionService:
         run = record.run
         if run is None:
             return _fail("Tag failed", "Run is not loaded.", record.path)
+        previous = list(run.tags)
         changed = False
         for tag in add:
             if run.add_tag(tag):
@@ -397,11 +473,22 @@ class RunActionService:
         try:
             saved = self.repository.write_tags(record.path, run.tags)
         except Exception as exc:
+            # The mutation lives on the cached Run the dashboard keeps handing out;
+            # leaving it applied after a failed write means a later, unrelated save
+            # commits an edit the user was told did not happen.
+            run.tags = previous
             return _fail("Tag save failed", str(exc), record.path)
+        note = ""
+        if _redacts(run.tags):
+            note = (
+                "\n[yellow]One of these tags looks like a credential. It is written "
+                "verbatim here, but opentine's redactor rewrites it the next time "
+                "anything re-saves this run.[/]"
+            )
         return ActionResult(
             True,
             "Tags updated",
-            f"Tags: {tags}\nSaved: {saved}\n(outside digest/signature — both preserved)",
+            f"Tags: {tags}\nSaved: {saved}\n(outside digest/signature — both preserved){note}",
             run=run,
             path=saved,
             refresh=True,
@@ -414,6 +501,8 @@ class RunActionService:
         limits = (options.max_cost, options.max_steps, options.max_duration, options.max_usage)
         if all(value is None for value in limits):
             return _fail("Set budget failed", "Set at least one limit.", record.path)
+        manifest = getattr(run, "manifest", None)
+        previous = dict(manifest) if isinstance(manifest, dict) else None
         try:
             run.set_budget(
                 max_cost=options.max_cost,
@@ -421,9 +510,15 @@ class RunActionService:
                 max_duration=options.max_duration,
                 max_usage=options.max_usage,
                 on_breach=options.on_breach,
+                strict_cost=options.strict_cost,
             )
             saved = self.repository.save(run, record.path)
         except Exception as exc:
+            # Same reason as tags: an unsaved budget must not survive on the cached
+            # Run and ride along on the next successful write.
+            if previous is not None:
+                run.manifest.clear()
+                run.manifest.update(previous)
             return _fail("Set budget failed", f"{type(exc).__name__}: {exc}", record.path)
         note = " and dropped the signature" if record.has_signature else ""
         migr = (
@@ -458,6 +553,16 @@ class RunActionService:
         try:
             key = self._resolve_sign_key(options)
             out = Path(options.save_path).expanduser() if options.save_path else record.path
+            # `--force` (sign despite a failed integrity check) and `--overwrite`
+            # (replace a different file) are separate decisions in `tine sign`, and
+            # conflating them would let "yes, replace that file" quietly mean
+            # "yes, sign this tampered artifact".
+            if out != record.path and out.exists() and not options.overwrite:
+                return _fail(
+                    "Sign refused",
+                    f"{out} already exists; enable Overwrite to replace it.",
+                    record.path,
+                )
             saved = run.save(
                 out,
                 sign_key=key,
@@ -484,6 +589,27 @@ class RunActionService:
     def verify_signature(self, record: RunRecord, options: VerifyKeyOptions) -> ActionResult:
         if signing is None or not hasattr(Run, "verify_signature"):
             return _fail("Verify unavailable", "No signing support installed.", record.path)
+        # One signature is checked against one key. Supplying several and letting a
+        # precedence rule pick lets the artifact decide which key it is judged by,
+        # so `tine verify` refuses the combination outright and so does this.
+        if options.key_env and options.key_file:
+            return _fail(
+                "Verify refused",
+                "Both an env var and a file name an HMAC key; pass the one you mean.",
+                record.path,
+            )
+        if options.pubkey_file and (options.key_env or options.key_file):
+            return _fail(
+                "Verify refused",
+                "An Ed25519 public key and an HMAC key were both supplied; pass one.",
+                record.path,
+            )
+        if options.pubkey_file and options.trust_embedded:
+            return _fail(
+                "Verify refused",
+                "Trust-on-first-use accepts the artifact's own key; do not also pin one.",
+                record.path,
+            )
         try:
             kwargs: dict[str, Any] = {}
             if options.pubkey_file:
@@ -508,15 +634,24 @@ class RunActionService:
         title = "Signature verified" if result.ok else f"Signature {result.state}"
         return ActionResult(result.ok, title, message, path=record.path)
 
-    def keygen(self, out_path: str | Path) -> ActionResult:
+    def keygen(self, out_path: str | Path, force: bool = False) -> ActionResult:
         if signing is None or not getattr(signing, "HAS_ED25519", False):
             return _fail("Keygen unavailable", "Ed25519 needs: pip install opentine[crypto]")
+        out = Path(out_path).expanduser()
+        # Overwriting a private key destroys the only copy of a signing identity
+        # and makes every artifact it signed unverifiable, which is why
+        # `tine keygen` refuses without --force.
+        if out.exists() and not force:
+            return _fail("Keygen refused", f"{out} already exists; enable Force to replace it.")
         try:
             private_hex, public_hex = signing.generate_ed25519()
-            out = Path(out_path).expanduser()
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(private_hex + "\n", encoding="utf-8")
-            os.chmod(out, 0o600)
+            # Create the file private, then write: an 0644 window between write and
+            # chmod is long enough for another local process to read the seed.
+            descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(private_hex + "\n")
+            out.chmod(0o600)
             pub = out.with_name(out.name + ".pub")
             pub.write_text(public_hex + "\n", encoding="utf-8")
         except Exception as exc:
@@ -530,6 +665,8 @@ class RunActionService:
     def _resolve_sign_key(self, options: SignOptions) -> Any:
         if signing is None:
             raise ValueError("opentine signing support is unavailable")
+        if options.key_env and options.key_file:
+            raise ValueError("Both an env var and a file name an HMAC key; pass the one you mean.")
         if options.algorithm == "ed25519":
             if not getattr(signing, "HAS_ED25519", False):
                 raise ValueError("ed25519 unavailable — pip install opentine[crypto]")

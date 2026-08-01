@@ -1,11 +1,11 @@
 [project]
 name = "opentine-tui"
-version = "0.2.0"
+version = "0.4.0"
 description = "Terminal dashboard for opentine — visual management console with Textual"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "opentine contributors" }]
 keywords = ["agents", "llm", "fork", "replay", "run-tree", "tui"]
 classifiers = [
@@ -17,19 +17,23 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: User Interfaces",
 ]
 dependencies = [
-    # 0.2.0 ships .tine format v2: migration, tags+search/index, cost+budget,
-    # autosave/drafts, signing (tine-sig/1), and field-level diff — all surfaced
-    # by this dashboard.
-    "opentine>=0.2,<0.3",
-    "textual>=3.0",
+    # Portable .tine files are format v2 (migration, tags+search/index, cost+budget,
+    # autosave/drafts, signing, field-level diff); 0.3 added the git-shaped v3
+    # repository (objects, refs, fsck, semantic diff) and 0.4 made a v2 fork id
+    # identify the fork act — this dashboard surfaces all of it. The upper bound is
+    # deliberate: opentine states its data-compatibility guarantee per release, not
+    # its API's, and 0.4 already changed fork identity.
+    "opentine>=0.4,<0.5",
+    "textual>=3.0,<9",
 ]
 
 [project.optional-dependencies]
 # Ed25519 signing/keygen in the dashboard (HMAC-SHA256 works without it).
-crypto = ["opentine[crypto]>=0.2,<0.3"]
+crypto = ["opentine[crypto]>=0.4,<0.5"]
 dev = [
     "build>=1.2",
     "pytest>=9.0",
@@ -46,18 +50,62 @@ opentine-tui = "opentine_tui:main"
 Homepage = "https://opentine.com"
 Repository = "https://github.com/0xcircuitbreaker/opentine-tui"
 Issues = "https://github.com/0xcircuitbreaker/opentine-tui/issues"
+Changelog = "https://github.com/0xcircuitbreaker/opentine-tui/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["opentine_tui"]
+
+[tool.hatch.build.targets.sdist]
+# Ship what a contributor needs to reproduce a release, not the whole worktree.
+include = [
+    "opentine_tui",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP"]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import order
+    "W",    # warnings
+    "UP",   # pyupgrade
+    "B",    # bugbear: mutable defaults, shadowed loop vars, except-in-finally
+    "C4",   # comprehension rewrites
+    "SIM",  # simplifiable branches
+    "RUF",  # ruff's own lints
+    "PTH",  # pathlib over os.path
+]
+ignore = [
+    # The dashboard must not die on a malformed artifact, so several handlers
+    # really do catch broadly and report; each one carries a comment saying why.
+    "B904",
+    # `BINDINGS = [...]` and `DEFAULT_CSS` are Textual's declarative class-level
+    # idiom, not accidental shared mutable state.
+    "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# A warning from opentine or Textual is a signal the dashboard is using a
+# deprecated path; make it fail rather than scroll past.
+filterwarnings = ["error", "default::ResourceWarning"]
+addopts = "--strict-markers --strict-config"
