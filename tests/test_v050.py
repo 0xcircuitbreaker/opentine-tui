@@ -269,8 +269,11 @@ async def test_export_and_import_are_reachable_from_the_ui(tmp_path: Path):
         await pilot.pause()
         app.screen.query_one("#dest", Input).value = str(destination)
         app.screen.query_one("#ok").press()
-        for _ in range(6):
-            await pilot.pause()
+        # These actions hand the work to a thread; wait for the worker rather than
+        # for a guessed number of frames, which raced on a slow runner.
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
         assert destination.is_file()
 
         await pilot.press("I")
@@ -278,8 +281,9 @@ async def test_export_and_import_are_reachable_from_the_ui(tmp_path: Path):
         app.screen.query_one("#source", Input).value = str(destination)
         app.screen.query_one("#save", Input).value = str(runs_dir / "imported.tine")
         app.screen.query_one("#ok").press()
-        for _ in range(10):
-            await pilot.pause()
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
         assert (runs_dir / "imported.tine").is_file()
         # The result must survive the refresh the import triggers.
