@@ -7,7 +7,7 @@ and there is no response-time guarantee.
 ## Setup
 
 ```bash
-pip install -e ".[dev]"   # resolves opentine>=0.4,<0.5 from PyPI
+pip install -e ".[dev]"   # resolves opentine>=0.5,<0.6 from PyPI
 ```
 
 ## Before opening a pull request
@@ -28,8 +28,8 @@ checkout — a worktree at a release tag, or a branch you are developing —
 point `OPENTINE_SRC` at it:
 
 ```bash
-git -C ../opentine worktree add /tmp/opentine-v040 v0.4.0
-OPENTINE_SRC=/tmp/opentine-v040 pytest
+git -C ../opentine worktree add /tmp/opentine-v050 v0.5.0
+OPENTINE_SRC=/tmp/opentine-v050 pytest
 ```
 
 Target the **released** opentine, not its development branch. This repository

@@ -5,6 +5,36 @@ All notable changes to opentine-tui are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-01
+
+Tracks opentine 0.5.0, the Ecosystem Release. Requires `opentine>=0.5,<0.6`.
+
+### Added
+- **Export to OpenTelemetry** (`E`). Renders the selected run as GenAI spans in a
+  complete OTLP/JSON document via `to_otel_genai_document`, so a verified run can
+  be shipped to whatever observability backend runs beside it. A portable
+  artifact and a repository run both work unchanged — the exporter takes anything
+  with steps.
+- **Import a foreign trace** (`I`). OpenTelemetry (OTLP/JSON or spans), OpenTine
+  JSONL, or a framework's logs (LangChain, LlamaIndex, AutoGen, CrewAI,
+  OpenAI-Agents), written as a portable `.tine` artifact, into the v3 repository,
+  or both. It mirrors `tine import`: at least one destination is required, an
+  artifact-only import builds in a throwaway repository so none is left behind,
+  and capture stays off because the provenance belongs to the machine that
+  produced the trace. A test pins the format list to the CLI's own, so a format
+  added there fails the suite instead of going unnoticed.
+- A round-trip test holds the dashboard to opentine's claim that import and
+  export are inverses.
+
+### Fixed
+- **A poll discarded the step you were reading.** Repainting the run list clears
+  and re-adds every row, which re-highlighted the cursor and re-announced the
+  same run — so every five seconds the open step was deselected and the detail
+  panel snapped back to the run summary. A row is now announced only when the
+  selection actually changes, and a highlight queued mid-repaint is discarded as
+  stale. This also stops an action's result being overwritten a moment after it
+  appears, and saves a full step-tree rebuild on every tick.
+
 ## [0.4.0] - 2026-07-31
 
 Tracks opentine 0.4.0, which changed how a portable fork's identity is derived.

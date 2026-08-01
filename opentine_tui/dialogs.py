@@ -17,6 +17,12 @@ from opentine_tui.actions import (
     SignOptions,
     VerifyKeyOptions,
 )
+from opentine_tui.interop import (
+    DEFAULT_REF,
+    IMPORT_FORMATS,
+    ExportOptions,
+    TraceImportOptions,
+)
 from opentine_tui.repo_actions import EvaluateOptions, ImportOptions, PromoteOptions
 
 try:
@@ -653,3 +659,106 @@ def parse_scores(text: str) -> dict[str, float]:
         except ValueError:
             raise ValueError(f"{value.strip()!r} is not a number") from None
     return scores
+
+
+class ExportModal(_Dialog):
+    """Write the selected run as an OpenTelemetry GenAI (OTLP/JSON) document."""
+
+    DEFAULT_CSS = _DIALOG_CSS % {"name": "ExportModal"}
+
+    def __init__(self, default_destination: str = "") -> None:
+        super().__init__()
+        self.default_destination = default_destination
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("[bold #FF6900]Export as OpenTelemetry[/]")
+            yield Static(
+                "[dim]Renders the run as GenAI spans in a complete OTLP/JSON document.\n"
+                "Import and export are inverses, so `tine import --format otel-json`\n"
+                "reads the result back.[/]"
+            )
+            yield Input(
+                value=self.default_destination, placeholder="destination .json path", id="dest"
+            )
+            yield Input(value="opentine", placeholder="service.name", id="service")
+            yield from _toggle("Overwrite an existing file", "overwrite")
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Export", id="ok", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ok":
+            self.dismiss(None)
+            return
+        destination = self._value("#dest")
+        if not destination:
+            self._error("A destination path is required.")
+            return
+        self.dismiss(
+            ExportOptions(
+                destination=destination,
+                service_name=self._value("#service") or "opentine",
+                overwrite=self._switch("#overwrite"),
+            )
+        )
+
+
+class TraceImportModal(_Dialog):
+    """Import a foreign agent trace as a run (`tine import`)."""
+
+    DEFAULT_CSS = _DIALOG_CSS % {"name": "TraceImportModal"}
+
+    def __init__(self, has_repository: bool = False) -> None:
+        super().__init__()
+        self.has_repository = has_repository
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("[bold #FF6900]Import a trace[/]")
+            yield Static(
+                "[dim]OpenTelemetry GenAI, OpenTine JSONL, or a framework's logs.\n"
+                "At least one destination is required. Capture stays off: the\n"
+                "provenance belongs to the machine that produced the trace.[/]"
+            )
+            yield Input(placeholder="source trace file", id="source")
+            yield Select(
+                [(name, name) for name in IMPORT_FORMATS],
+                value="otel-json",
+                allow_blank=False,
+                id="format",
+            )
+            yield Input(placeholder="save as .tine (optional)", id="save")
+            if self.has_repository:
+                yield from _toggle("Also record into the v3 repository", "into_repo")
+                yield Input(value="heads/main", placeholder="ref to advance", id="ref")
+            yield from _toggle("Overwrite an existing .tine destination", "overwrite")
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Import", id="ok", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ok":
+            self.dismiss(None)
+            return
+        source = self._value("#source")
+        if not source:
+            self._error("A source trace file is required.")
+            return
+        into_repo = self.has_repository and self._switch("#into_repo")
+        save = self._value("#save")
+        if not save and not into_repo:
+            self._error("Give a .tine destination, record into the repository, or both.")
+            return
+        self.dismiss(
+            TraceImportOptions(
+                source=source,
+                source_format=str(self.query_one("#format", Select).value or "otel-json"),
+                save_path=save,
+                into_repository=into_repo,
+                ref=(self._value("#ref") if self.has_repository else "") or DEFAULT_REF,
+                overwrite=self._switch("#overwrite"),
+            )
+        )

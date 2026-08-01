@@ -1,6 +1,6 @@
 [project]
 name = "opentine-tui"
-version = "0.4.0"
+version = "0.5.0"
 description = "Terminal dashboard for opentine — visual management console with Textual"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,17 +23,18 @@ classifiers = [
 dependencies = [
     # Portable .tine files are format v2 (migration, tags+search/index, cost+budget,
     # autosave/drafts, signing, field-level diff); 0.3 added the git-shaped v3
-    # repository (objects, refs, fsck, semantic diff) and 0.4 made a v2 fork id
-    # identify the fork act — this dashboard surfaces all of it. The upper bound is
+    # repository (objects, refs, fsck, semantic diff), 0.4 made a v2 fork id
+    # identify the fork act, and 0.5 added OpenTelemetry GenAI export plus the
+    # trace importers — this dashboard surfaces all of it. The upper bound is
     # deliberate: opentine states its data-compatibility guarantee per release, not
     # its API's, and 0.4 already changed fork identity.
-    "opentine>=0.4,<0.5",
+    "opentine>=0.5,<0.6",
     "textual>=3.0,<9",
 ]
 
 [project.optional-dependencies]
 # Ed25519 signing/keygen in the dashboard (HMAC-SHA256 works without it).
-crypto = ["opentine[crypto]>=0.4,<0.5"]
+crypto = ["opentine[crypto]>=0.5,<0.6"]
 dev = [
     "build>=1.2",
     "pytest>=9.0",

@@ -32,6 +32,7 @@ from opentine_tui.dialogs import (
     BudgetModal,
     ConfirmationModal,
     EvaluateModal,
+    ExportModal,
     HarnessOptionsModal,
     ImportModal,
     MigrateModal,
@@ -39,11 +40,13 @@ from opentine_tui.dialogs import (
     SignModal,
     TagEditorModal,
     TextInputModal,
+    TraceImportModal,
     VerifyKeyModal,
 )
 from opentine_tui.formatting import escape_markup
+from opentine_tui.interop import InteropService
 from opentine_tui.repo_actions import RepoActionService
-from opentine_tui.repository import RunRecord, RunRepository, filter_records
+from opentine_tui.repository import RunRecord, RunRepository, filter_records, safe_filename
 from opentine_tui.v3 import RepoRunRecord, V3Repository
 from opentine_tui.widgets.repo_list import RepoList, RepoRunSelected
 from opentine_tui.widgets.run_list import RunList, RunSelected
@@ -209,6 +212,21 @@ class OpentineTUI(App):
             show=False,
             tooltip="Show a verified v3 object by id",
         ),
+        # interop (0.5.0)
+        Binding(
+            "E",
+            "export_otel",
+            "Export OTel",
+            show=False,
+            tooltip="Write the selected run as an OpenTelemetry GenAI document",
+        ),
+        Binding(
+            "I",
+            "import_trace",
+            "Import trace",
+            show=False,
+            tooltip="Import an OTel / JSONL / framework trace as a run",
+        ),
     ]
 
     TITLE = "opentine"
@@ -226,6 +244,7 @@ class OpentineTUI(App):
         # (or the cwd) to the first `.tine/config.json`, exactly as `tine` does.
         self.v3 = V3Repository.discover(repo_path)
         self.repo_actions = RepoActionService(self.v3) if self.v3 is not None else None
+        self.interop = InteropService(self.repository, self.v3)
         self._records: list[RunRecord] = []
         self._all_records: list[RunRecord] = []
         self._selected_record: RunRecord | None = None
@@ -947,6 +966,35 @@ class OpentineTUI(App):
         # Blobs stay unresolved: `inspect` deliberately does not auto-resolve the
         # unredacted legacy blob, and the dashboard should not widen that.
         self._show_result(await self._run_in_thread(self._repo_service().inspect, oid))
+
+    # -- interop (opentine 0.5.0) -------------------------------------------
+
+    @work
+    async def action_export_otel(self) -> None:
+        """Write the selected run as an OpenTelemetry GenAI document."""
+        run = self._active_run()
+        if run is None:
+            self._show_result(
+                ActionResult(
+                    False, "No run selected", "Select a run to export, from either source."
+                )
+            )
+            return
+        # The exporter takes anything with `.steps`, so a repository run needs no
+        # translation — but its id is an object id, which is a poor filename.
+        stem = safe_filename(getattr(run, "id", "run"))
+        options = await self.push_screen_wait(ExportModal(default_destination=f"{stem}.otel.json"))
+        if options is None:
+            return
+        self._show_result(await self._run_in_thread(self.interop.export_otel, run, options))
+
+    @work
+    async def action_import_trace(self) -> None:
+        """Import a foreign agent trace as a run (`tine import`)."""
+        options = await self.push_screen_wait(TraceImportModal(has_repository=self.v3 is not None))
+        if options is None:
+            return
+        self._show_result(await self._run_in_thread(self.interop.import_trace, options))
 
     def _repo_service(self) -> RepoActionService:
         assert self.repo_actions is not None  # guarded by _require_repo_record / self.v3
