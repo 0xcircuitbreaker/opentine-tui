@@ -1,12 +1,9 @@
-name: GitHub Release Artifacts
+name: Release
 
 on:
   push:
     tags:
       - "v*"
-
-env:
-  OPENTINE_GIT: "opentine @ git+https://github.com/0xcircuitbreaker/opentine.git@main"
 
 jobs:
   release-artifacts:
@@ -26,9 +23,6 @@ jobs:
 
       - name: Upgrade build tooling
         run: python -m pip install --upgrade pip
-
-      - name: Install opentine from source
-        run: python -m pip install "${{ env.OPENTINE_GIT }}"
 
       - name: Install opentine-tui with dev extras
         run: python -m pip install -e ".[dev]"
@@ -71,3 +65,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/opentine_tui-* dist/SHA256SUMS --verify-tag --generate-notes
+
+  # The README tells people to `pip install opentine-tui`, so a release has to
+  # reach PyPI. Until this job existed the workflow only attached artifacts to a
+  # GitHub release, which is why PyPI stalled at 0.1.0 while the project moved on.
+  #
+  # ONE-TIME SETUP, or this job fails the release:
+  #   1. On PyPI, add a Trusted Publisher for the `opentine-tui` project:
+  #      owner `0xcircuitbreaker`, repository `opentine-tui`,
+  #      workflow `publish.yml`, environment `pypi`.
+  #   2. In this repository's settings, create an environment named `pypi`
+  #      (add required reviewers there if you want a manual gate on releases).
+  # No API token is stored anywhere: publishing authenticates with a short-lived
+  # OIDC token minted for this workflow.
+  publish-pypi:
+    needs: release-artifacts
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/opentine-tui
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download the artifacts the release job built
+        uses: actions/download-artifact@v4
+        with:
+          name: opentine-tui-release-artifacts
+          path: dist
+
+      - name: Drop the checksum file
+        # PyPI accepts distributions only; SHA256SUMS belongs to the GitHub release.
+        run: rm -f dist/SHA256SUMS
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

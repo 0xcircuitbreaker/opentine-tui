@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from opentine.core import Run, StepKind
-from rich.markup import escape
 from textual.message import Message
 from textual.widgets import Tree
+
+from opentine_tui.formatting import billing_status, short_ref, step_cost, token_total
+from opentine_tui.formatting import escape_markup as escape
 
 STEP_ICONS = {
     StepKind.think: "*",
@@ -100,21 +102,40 @@ class StepTree(Tree):
             else:
                 label = (
                     f"[{color}]{icon}[/] [{color}]{step.kind.value}[/]  "
-                    f"{getattr(step, 'short_id', step.id[:12])}"
+                    f"{escape(short_ref(step.id))}"
                 )
 
-            cost_str = f"  [dim]${step.cost:.4f}[/]" if step.cost > 0 else ""
+            cost = step_cost(step)
+            cost_str = f"  [dim]${cost:.4f}[/]" if cost > 0 else ""
+            billing = billing_status(step)
+            if billing is not None and billing[0] in ("unknown", "partial"):
+                # A blank cost column cannot distinguish "free" from "we could not
+                # price this", and the second one is the one that costs money.
+                cost_str += f"  [{billing[2]}]?[/]"
             dur_str = f"  [dim]{step.duration:.1f}s[/]" if step.duration > 0 else ""
+            tokens = token_total(getattr(step, "usage", {}))
+            tok_str = f"  [dim]{tokens}tok[/]" if tokens else ""
 
             data = StepNodeData(run.id, step.id)
-            parent_id = getattr(step, "parent_id", None)
-            if parent_id and parent_id in nodes:
-                node = nodes[parent_id].add(label + cost_str + dur_str, data=data)
+            annotated = label + cost_str + tok_str + dur_str
+            # A step may have several parents. It is attached under the first one
+            # already drawn, and the remaining edges are named in the label, so a
+            # merge is visible instead of silently reduced to one ancestor.
+            parents = [
+                parent for parent in getattr(step, "parent_ids", None) or [] if parent in nodes
+            ]
+            if len(parents) > 1:
+                merged = ", ".join(short_ref(parent) for parent in parents[1:])
+                annotated += f"  [#FF6900]⋈ also from {escape(merged)}[/]"
+            if parents:
+                node = nodes[parents[0]].add(annotated, data=data)
             else:
-                node = self.root.add(label + cost_str + dur_str, data=data)
+                node = self.root.add(annotated, data=data)
             nodes[step.id] = node
 
-        self.root.expand()
+        # Every node is created collapsed, so expanding only the root showed a run
+        # as a single step with the rest hidden one keypress deep, per level.
+        self.root.expand_all()
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data

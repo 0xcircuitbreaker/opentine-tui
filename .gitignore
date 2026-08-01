@@ -6,3 +6,8 @@ dist/
 build/
 .ruff_cache/
 .pytest_cache/
+
+# Local agent/editor state — never part of a release
+.claude/
+.idea/
+.vscode/
