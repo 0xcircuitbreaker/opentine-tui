@@ -311,8 +311,11 @@ async def test_verify_runs_fsck_in_repository_mode(workspace):
         await pilot.press("]")
         await pilot.pause()
         await pilot.press("v")
-        for _ in range(6):
-            await pilot.pause()
+        # fsck runs in a thread; wait for the worker rather than a guessed number
+        # of frames, which races on a slow runner.
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
         assert "Repository OK" in app.query_one(StepDetail).last_rendered
 

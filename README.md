@@ -12,11 +12,12 @@ pip install opentine-tui
 ```
 
 That pulls in [`opentine`](https://github.com/0xcircuitbreaker/opentine)
-`>=0.4,<0.5`. Portable `.tine` files are **format v2** (migration, tags + search,
+`>=0.5,<0.6`. Portable `.tine` files are **format v2** (migration, tags + search,
 cost + budget, autosave/drafts, signing, field-level diff); 0.3 added the
 git-shaped **v3 repository** (content-addressed objects, refs, fsck, semantic
-diff, attestations) and 0.4 made a fork id identify the **fork act** — the
-dashboard manages all of it.
+diff, attestations), 0.4 made a fork id identify the **fork act**, and 0.5 added
+**OpenTelemetry GenAI export** and the **trace importers** — the dashboard
+manages all of it.
 
 Ed25519 signing and keygen work out of the box: `opentine` 0.4 depends on
 `cryptography` directly. The `crypto` extra is kept as a no-op so
@@ -102,9 +103,27 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `e` | Record an evaluation attestation (scores) on a repository run |
 | `l` | Walk a ref's event ancestry |
 | `o` | Inspect a verified v3 object by id |
+| `E` | Export the selected run as an OpenTelemetry GenAI (OTLP/JSON) document |
+| `I` | Import an OTel / JSONL / framework trace as a run |
 
 Write operations and external harness launches require an explicit confirmation
 modal before they run.
+
+## What's new for opentine 0.5.0
+
+- **Export to OpenTelemetry** (`E`) — renders the selected run as GenAI spans in a
+  complete OTLP/JSON document, so a verified run can be shipped to whatever
+  observability backend runs beside it. Works on a portable artifact and a
+  repository run alike, because the exporter takes anything with steps.
+- **Import a foreign trace** (`I`) — OpenTelemetry (OTLP/JSON or spans), OpenTine
+  JSONL, or a framework's logs (LangChain, LlamaIndex, AutoGen, CrewAI,
+  OpenAI-Agents), written as a portable `.tine` artifact, into the v3 repository,
+  or both. It mirrors `tine import` exactly: at least one destination is
+  required, a `--save`-only import builds in a throwaway repository so none is
+  left behind, and capture stays off because the provenance belongs to the
+  machine that produced the trace.
+- Import and export are inverses, and there is a test holding the dashboard to
+  that: a run exported and re-imported comes back with the same steps.
 
 ## What's new for opentine 0.4.0
 
@@ -170,7 +189,7 @@ The dashboard now manages the full `.tine` **format v2** surface:
 ## Development
 
 ```bash
-pip install -e ".[dev]"   # resolves opentine>=0.4,<0.5 from PyPI
+pip install -e ".[dev]"   # resolves opentine>=0.5,<0.6 from PyPI
 
 ruff check .
 ruff format --check .
@@ -182,8 +201,8 @@ about what users get. To test against a source checkout instead — a worktree a
 release tag, say — point `OPENTINE_SRC` at it:
 
 ```bash
-git -C ../opentine worktree add /tmp/opentine-v040 v0.4.0
-OPENTINE_SRC=/tmp/opentine-v040 pytest
+git -C ../opentine worktree add /tmp/opentine-v050 v0.5.0
+OPENTINE_SRC=/tmp/opentine-v050 pytest
 ```
 
 CI runs lint, format, the test suite, a packaging build, and a `twine` metadata

@@ -59,6 +59,9 @@ class RepoList(DataTable):
         super().__init__()
         self._records: list[RepoRunRecord] = []
         self._columns_added = False
+        # See RunList: repainting re-highlights, and re-announcing the same run
+        # would reset the open step and clobber an action's result every poll.
+        self._announced: str | None = None
 
     def on_mount(self) -> None:
         self._ensure_columns()
@@ -87,6 +90,7 @@ class RepoList(DataTable):
             )
         if highlighted is not None:
             self.highlight_key(highlighted)
+            self._announced = highlighted
 
     @property
     def highlighted_key(self) -> str | None:
@@ -108,6 +112,7 @@ class RepoList(DataTable):
     def action_select_run(self) -> None:
         key = self.highlighted_key
         if key is not None:
+            self._announced = key
             self.post_message(RepoRunSelected(key))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -118,8 +123,11 @@ class RepoList(DataTable):
         event.stop()
         # An empty table emits this with `row_key` itself None.
         key = getattr(event.row_key, "value", None)
-        if key is not None:
-            self.post_message(RepoRunSelected(key))
+        # See RunList: a highlight queued during a repaint is stale by delivery.
+        if key is None or key != self.highlighted_key or key == self._announced:
+            return
+        self._announced = key
+        self.post_message(RepoRunSelected(key))
 
     def _ensure_columns(self) -> None:
         if not self._columns_added:

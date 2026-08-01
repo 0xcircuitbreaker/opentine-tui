@@ -8,9 +8,9 @@ release rather than as a patch to an older tag.
 
 | Version | opentine | Supported |
 | --- | --- | --- |
-| 0.4.x | >=0.4,<0.5 | Yes |
+| 0.5.x | >=0.5,<0.6 | Yes |
+| 0.4.x | >=0.4,<0.5 | No |
 | 0.3.x | >=0.3,<0.4 | No |
-| 0.2.x | >=0.2,<0.3 | No |
 
 Upgrade before reporting — the issue may already be fixed.
 
