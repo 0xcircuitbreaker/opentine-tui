@@ -27,6 +27,19 @@ follows the opentine release it tracks.
   logs and `auto`) is offered.
 - The Files list flags v2 files (`2`) that `m` can upgrade.
 
+### Quality of life
+- Enter submits and Ctrl+S saves in every dialog; confirmations default to
+  Cancel and accept y/n; fields validate as you type.
+- Command palette (Ctrl+P) lists every action that applies right now; the
+  footer and help disable actions that don't (and every write while one runs).
+- Copy run id / path / digest / step id (`Y`), go to run (`g`), sort the run
+  list (`S` or click a header), live search with match count and history (`/`),
+  Escape clears the filter.
+- Step tree: lazy expansion past 500 steps, next error (`!`), find (`Ctrl+/`,
+  `n`/`N`), aligned cost/token/duration columns; detail panel truncates long
+  inputs/outputs (`z` expands) and shows errors first.
+- Panel borders show focus and counts; an `opentine` theme.
+
 ### Fixed
 - **Fork/replay-with-harness sent the wrong context.** The harness was given the
   steps *after* the fork point (the history the user chose to discard) instead
@@ -39,7 +52,24 @@ follows the opentine release it tracks.
   a failed result.
 - Messages no longer show literal `[dim]`/`[yellow]` markup.
 
+- Rewind with no step selected rewinds to before the run, as `tine` does.
+- Resume reports that a re-save removed the signature.
+- Tagging a v4 file keeps it v4 even with `OPENTINE_FORMAT=2`.
+- The poll no longer cancels a scan in flight, a live repaint keeps the open
+  step, actions use the step selected when they started, and a repository run
+  that disappears clears the selection.
+- A v4 import refuses a blank ref and asks before moving an existing one;
+  repository forks set their ref by compare-and-swap.
+
 ### Security
+- Key generation writes through a private temp file renamed into place and
+  refuses symlinks (it followed links, and kept 0644 on a forced overwrite).
+- A hostile step id can no longer steer a fork's default path outside the runs
+  directory; artifact and user values reach `tine` as `--opt=value`.
+- `tine` children run with `python -P`, so a package planted in the working
+  directory cannot shadow opentine.
+- In-process trace import refuses files over 256 MiB before reading them.
+- Step-tree labels are built from plain text spans, never parsed as markup.
 - Artifact reads go through opentine's bounded reader (256 MiB cap, duplicate
   keys, NaN and nesting bombs refused). The old `read_text` could be made to
   exhaust memory by any file dropped into the runs directory, on every poll.
