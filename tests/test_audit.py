@@ -249,3 +249,27 @@ async def test_a_poll_does_not_cancel_a_running_scan(tmp_path: Path):
         app._poll()
         await pilot.pause()
         assert all(not w.is_cancelled for w in running)
+
+
+@pytest.mark.asyncio
+async def test_step_labels_survive_backslash_bracket_payloads(tmp_path: Path):
+    """Rich reads `\\\\[` as an escaped backslash followed by a live tag; labels
+    are built from plain spans, so recorded text can never open a style."""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    run = Run(id="evil\\", model_info="m\\[bold]")
+    run.add_step(StepKind.tool, {"name": "x\\", "arguments": {"q": "\\[red]boom\\[/]"}})
+    run.add_step(StepKind.think, {"text": "\\[link=http://e]x\x1b]8;;"})
+    run.status = RunStatus.completed
+    RunRepository(runs).save(run)
+    app = OpentineTUI(runs_dir=runs, repo_path=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        from opentine_tui.widgets.step_tree import StepTree
+
+        tree = app.query_one(StepTree)
+        labels = [str(node.label) for node in tree.root.children]
+        assert any("[red" in label for label in labels)  # shown literally, not styled
+        assert all("\x1b" not in label for label in labels)
+        assert "evil\\" in str(tree.root.label)
+        assert app.is_running

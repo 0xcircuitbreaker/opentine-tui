@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from functools import partial
 from pathlib import Path
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.theme import Theme
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 
 from opentine_tui.actions import (
@@ -31,13 +34,16 @@ from opentine_tui.actions import (
 from opentine_tui.dialogs import (
     BudgetModal,
     ConfirmationModal,
+    CopyMenuModal,
     EvaluateModal,
     ExportModal,
     ForkEditModal,
+    GotoRunModal,
     HarnessOptionsModal,
     ImportModal,
     MigrateModal,
     PromoteModal,
+    SearchModal,
     SignModal,
     TagEditorModal,
     TextInputModal,
@@ -62,6 +68,94 @@ BRAND = "#FF6900"
 
 _escape_markup = escape_markup
 
+OPENTINE_THEME = Theme(
+    name="opentine",
+    primary=BRAND,
+    secondary="#3B82F6",
+    accent="#22D3EE",
+    warning="#FACC15",
+    error="#EF4444",
+    success="#22C55E",
+    dark=True,
+)
+
+# Repository-only actions are greyed out in the footer (and the key blocked) on the
+# Files tab. File-only actions (tag, budget, sign, ...) stay enabled on the
+# Repository tab on purpose: pressing one there explains *why* a v3 object cannot
+# be edited and how to get to the Files tab, which a silently dead key would not.
+REPO_ONLY_ACTIONS = frozenset({"promote", "evaluate", "repo_log", "inspect_object"})
+# Never blocked while an action runs: they read state, move focus or change the view.
+SAFE_WHILE_BUSY = frozenset(
+    {
+        "quit",
+        "show_help_panel",
+        "refresh",
+        "search",
+        "toggle_source",
+        "focus_left",
+        "focus_center",
+        "focus_right",
+        "clear_filter",
+        "yank",
+        "cycle_sort",
+        "goto_run",
+        "command_palette",
+    }
+)
+
+COMMAND_GROUPS = {
+    "refresh": "Navigation",
+    "search": "Navigation",
+    "toggle_source": "Navigation",
+    "clear_filter": "Navigation",
+    "cycle_sort": "Navigation",
+    "goto_run": "Navigation",
+    "yank": "Navigation",
+    "show_help_panel": "Navigation",
+    "import_run": "Repo",
+    "promote": "Repo",
+    "evaluate": "Repo",
+    "repo_log": "Repo",
+    "inspect_object": "Repo",
+    "export_otel": "Interop",
+    "import_trace": "Interop",
+}
+_PALETTE_SKIP = frozenset({"quit", "focus_left", "focus_center", "focus_right"})
+
+
+class OpentineCommands(Provider):
+    """Every dashboard key binding, searchable from the command palette (ctrl+p)."""
+
+    def _commands(self) -> list[tuple[str, str, str]]:
+        app = self.app
+        out: list[tuple[str, str, str]] = []
+        for binding in OpentineTUI.BINDINGS:
+            if not isinstance(binding, Binding) or binding.action in _PALETTE_SKIP:
+                continue
+            if app.check_action(binding.action, ()) is not True:
+                continue
+            group = COMMAND_GROUPS.get(binding.action, "Run")
+            key = app.get_key_display(binding)
+            label = f"{group}: {binding.description}  ({key})"
+            out.append((label, binding.tooltip or binding.description, binding.action))
+        return out
+
+    async def discover(self) -> Hits:
+        for label, help_text, action in self._commands():
+            yield DiscoveryHit(label, partial(self.app.run_action, action), help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for label, help_text, action in self._commands():
+            score = matcher.match(label)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(label),
+                    partial(self.app.run_action, action),
+                    help=help_text,
+                )
+
 
 class OpentineTUI(App):
     CSS = """
@@ -71,26 +165,31 @@ class OpentineTUI(App):
     #main {
         height: 1fr;
     }
+    #left-panel,
+    #center-panel,
+    #right-panel {
+        border: round $panel-darken-1;
+        border-title-color: $primary;
+        border-title-style: bold;
+        border-subtitle-color: $text-muted;
+    }
+    #left-panel:focus-within,
+    #center-panel:focus-within,
+    #right-panel:focus-within {
+        border: round $primary;
+    }
     #left-panel {
         width: 1fr;
         min-width: 32;
         max-width: 64;
-        border-right: solid #FF6900;
     }
     #center-panel {
         width: 1fr;
         min-width: 22;
-        border-right: solid #FF6900;
     }
     #right-panel {
         width: 1fr;
         min-width: 24;
-    }
-    #runs-title,
-    #steps-title,
-    #detail-title {
-        height: 1;
-        padding-left: 1;
     }
     RunList,
     RepoList,
@@ -123,6 +222,28 @@ class OpentineTUI(App):
             "toggle_source",
             "Files/Repo",
             tooltip="Switch the run list between .tine files and the v3 repository",
+        ),
+        Binding(
+            "escape",
+            "clear_filter",
+            "Clear filter",
+            show=False,
+            tooltip="Drop the active run filter (only while one is set)",
+        ),
+        Binding(
+            "S",
+            "cycle_sort",
+            "Sort",
+            show=False,
+            tooltip="Cycle the run list sort: age, cost, steps, status, id",
+        ),
+        Binding("g", "goto_run", "Go to run", show=False, tooltip="Jump to a run by id prefix"),
+        Binding(
+            "Y",
+            "yank",
+            "Copy",
+            show=False,
+            tooltip="Copy the run id, file path, step id or digest to the clipboard",
         ),
         Binding("1", "focus_left", "Runs", show=False),
         Binding("2", "focus_center", "Steps", show=False),
@@ -266,6 +387,8 @@ class OpentineTUI(App):
         ),
     ]
 
+    COMMANDS = App.COMMANDS | {OpentineCommands}
+
     TITLE = "opentine"
     SUB_TITLE = "agent run manager"
 
@@ -291,35 +414,36 @@ class OpentineTUI(App):
         self._selected_step_id: str | None = None
         self._query: str = ""
         self._refresh_timer = None
+        self._query_history: list[str] = []
+        self._busy = 0
+        self.register_theme(OPENTINE_THEME)
+        self.theme = "opentine"
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main"):
-            with Vertical(id="left-panel"):
-                yield Static("[bold #FF6900]Runs[/]", id="runs-title")
-                with TabbedContent(id="sources"):
-                    with TabPane("Files", id=FILES_TAB):
-                        yield RunList()
-                    with TabPane("Repository", id=REPO_TAB):
-                        if self.v3 is None:
-                            yield Static(
-                                "[dim]No v3 repository here.\n\n"
-                                "`tine init` creates one; run the dashboard from a "
-                                "directory beneath it, or pass --repo.[/]",
-                                id="repo-empty",
-                            )
-                        else:
-                            yield RepoList()
+            with Vertical(id="left-panel"), TabbedContent(id="sources"):
+                with TabPane("Files", id=FILES_TAB):
+                    yield RunList()
+                with TabPane("Repository", id=REPO_TAB):
+                    if self.v3 is None:
+                        yield Static(
+                            "[dim]No v3 repository here.\n\n"
+                            "`tine init` creates one; run the dashboard from a "
+                            "directory beneath it, or pass --repo.[/]",
+                            id="repo-empty",
+                        )
+                    else:
+                        yield RepoList()
             with Vertical(id="center-panel"):
-                yield Static("[bold #FF6900]Steps[/]", id="steps-title")
                 yield StepTree()
-            with Vertical(id="right-panel"):
-                yield Static("[bold #FF6900]Details[/]", id="detail-title")
-                with VerticalScroll(id="detail-scroll"):
-                    yield StepDetail()
+            with Vertical(id="right-panel"), VerticalScroll(id="detail-scroll"):
+                yield StepDetail()
         yield Footer()
 
     def on_mount(self) -> None:
+        self._set_steps_title(None)
+        self._set_detail_title(None)
         self._refresh()
         self._refresh_repo()
         self.query_one(RunList).focus()
@@ -372,6 +496,10 @@ class OpentineTUI(App):
             return
         self.select_run(event.run_key)
 
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._update_runs_title()
+        self.refresh_bindings()
+
     def on_repo_run_selected(self, event: RepoRunSelected) -> None:
         if not self.repo_mode:
             return
@@ -393,17 +521,21 @@ class OpentineTUI(App):
         self._selected_repo_record = None
         self._repo_run = None
         self._selected_step_id = None
+        self.refresh_bindings()
         panels = self._panels()
         if panels is None:  # a highlight message landing during teardown
             return
         step_tree, step_detail = panels
+        self._set_detail_title(None)
 
         if record.run is None:
+            self._set_steps_title(None)
             step_tree.clear_run("[red]Corrupt run[/]")
             step_detail.set_run(record)
             return
 
         step_tree.load_run(record.run)
+        self._set_steps_title(record.run)
         step_detail.set_run(record)
 
     def select_repo_run(self, oid: str) -> None:
@@ -414,10 +546,12 @@ class OpentineTUI(App):
         self._selected_repo_record = record
         self._selected_record = None
         self._selected_step_id = None
+        self.refresh_bindings()
         panels = self._panels()
         if panels is None:  # a highlight message landing during teardown
             return
         step_tree, step_detail = panels
+        self._set_detail_title(None)
 
         try:
             run = self.v3.load_run(record.oid)
@@ -428,6 +562,7 @@ class OpentineTUI(App):
 
         self._repo_run = run
         step_tree.load_run(run)
+        self._set_steps_title(run)
         step_detail.set_repo_run(record, run)
 
     def select_step(self, step_id: str) -> None:
@@ -439,6 +574,29 @@ class OpentineTUI(App):
             return
         self._selected_step_id = step.id
         self.query_one(StepDetail).set_step(run, step)
+        self._set_detail_title(step.id)
+        self.refresh_bindings()
+
+    def _set_panel_title(self, selector: str, title: str, subtitle: str = "") -> None:
+        with contextlib.suppress(Exception):  # a title must never crash the dashboard
+            panel = self.query_one(selector)
+            panel.border_title = title
+            panel.border_subtitle = subtitle
+
+    def _set_steps_title(self, run) -> None:
+        if run is None:
+            self._set_panel_title("#center-panel", "Steps [2]")
+            return
+        count = len(getattr(run, "steps", []) or [])
+        self._set_panel_title(
+            "#center-panel", f"Steps [2] ({count})", "^/ find · n/N match · ! error"
+        )
+
+    def _set_detail_title(self, step_id: str | None) -> None:
+        title = "Detail [3]"
+        if step_id:
+            title += f": step {escape_markup(str(step_id)[:12])}"
+        self._set_panel_title("#right-panel", title, "Y copy")
 
     def _panels(self) -> tuple[StepTree, StepDetail] | None:
         """The centre and right panels, or None once they are gone.
@@ -556,18 +714,25 @@ class OpentineTUI(App):
                 self.select_step(step_id)
 
     def _update_runs_title(self, error: str | None = None) -> None:
-        title = "[bold #FF6900]Runs[/]"
-        if error:
-            title += f"  [red]{_escape_markup(error)}[/]"
-        elif self._query:
-            title += (
-                f"  [dim]filter:[/] {_escape_markup(self._query)} [dim]({len(self._records)})[/]"
-            )
-        widget = self.query_one("#runs-title", Static)
-        try:
-            widget.update(title)
-        except Exception:  # a panel title must never crash the dashboard
-            widget.update("Runs")
+        """'Runs [1] (shown/total)' on the left border; filter/sort hints below it."""
+        if self.repo_mode:
+            title = f"Runs [1] ({len(self._repo_records)})"
+            subtitle = "] files"
+        else:
+            title = f"Runs [1] ({len(self._records)}/{len(self._all_records)})"
+            try:
+                sort = self.query_one(RunList).sort_label
+            except Exception:
+                sort = ""
+            hints = [f"sort: {sort}"] if sort else []
+            if error:
+                hints.insert(0, f"[$error]{_escape_markup(error)}[/]")
+            elif self._query:
+                hints.insert(0, f"filter: {_escape_markup(self._query)} [dim]esc clears[/]")
+            else:
+                hints.append("/ filter")
+            subtitle = " · ".join(hints)
+        self._set_panel_title("#left-panel", title, subtitle)
 
     @work(exclusive=True, group="scan")
     async def action_refresh(self) -> None:
@@ -628,21 +793,123 @@ class OpentineTUI(App):
         else:
             self.select_run(key)
 
+    def _count_matches(self, query: str) -> int | str:
+        """For the live search dialog: the match count, or the parse error."""
+        matched, error = filter_records(self._all_records, query)
+        return error if error else len(matched)
+
     @work
     async def action_search(self) -> None:
+        # `status:` matches the RunStatus value, not the short label the list
+        # column prints; SearchModal's help line says so.
         value = await self.push_screen_wait(
-            TextInputModal(
-                "Search / filter runs",
-                # `status:` matches the RunStatus value, not the short label the
-                # list column prints, so `status:done` can never match anything.
-                "tag:x model:y status:completed cost:>0.01 after:2026-01-01 free text",
+            SearchModal(
                 value=self._query,
+                history=self._query_history,
+                count_fn=self._count_matches,
+                total=len(self._all_records),
             )
         )
         if value is None:  # cancelled — leave the active filter unchanged
             return
+        if value:
+            self._query_history = [value] + [q for q in self._query_history if q != value]
+            del self._query_history[20:]
         self._query = value  # empty string clears the filter
         self._refresh()
+        self.refresh_bindings()
+
+    def action_clear_filter(self) -> None:
+        self._query = ""
+        self._refresh()
+        self.refresh_bindings()
+
+    def action_cycle_sort(self) -> None:
+        with contextlib.suppress(Exception):  # the files pane may not be mounted
+            label = self.query_one(RunList).cycle_sort()
+            self._update_runs_title()
+            self.notify(f"Runs sorted by {label}", timeout=2)
+
+    @work
+    async def action_goto_run(self) -> None:
+        if self.repo_mode:
+            candidates = [
+                (r.key, f"{r.short_id} {r.oid} {' '.join(r.refs)}") for r in self._repo_records
+            ]
+        else:
+            candidates = [(r.key, f"{r.short_id} {r.run_id}") for r in self._all_records]
+        key = await self.push_screen_wait(GotoRunModal(candidates))
+        if key is None:
+            return
+        if self.repo_mode:
+            with contextlib.suppress(Exception):
+                self.query_one(RepoList).highlight_key(key)
+            self.select_repo_run(key)
+            return
+        if not any(record.key == key for record in self._records):
+            # The run is hidden by the filter: drop it so the row can be shown.
+            self._query = ""
+            self._refresh()
+        self.query_one(RunList).highlight_key(key)
+        self.select_run(key)
+
+    def _copy_choices(self) -> list[tuple[str, str]]:
+        choices: list[tuple[str, str]] = []
+        record = self._selected_record
+        if record is not None:
+            choices.append((f"run id  {record.run_id}", record.run_id))
+            choices.append((f"file path  {record.path}", str(record.path)))
+            digest = getattr(record.integrity, "expected", None) or getattr(
+                record.integrity, "actual", None
+            )
+            if digest:
+                choices.append((f"digest  {digest}", str(digest)))
+        elif self._selected_repo_record is not None:
+            repo = self._selected_repo_record
+            choices.append((f"object id  {repo.oid}", repo.oid))
+            if repo.source_run_id:
+                choices.append((f"run id  {repo.source_run_id}", repo.source_run_id))
+            for ref in repo.refs:
+                choices.append((f"ref  {ref}", ref))
+        if self._selected_step_id:
+            choices.append((f"step id  {self._selected_step_id}", self._selected_step_id))
+        return choices
+
+    @work
+    async def action_yank(self) -> None:
+        choices = self._copy_choices()
+        if not choices:
+            self.notify("Select a run first.", title="Copy", severity="warning")
+            return
+        value = await self.push_screen_wait(CopyMenuModal(choices))
+        if value is None:
+            return
+        self.copy_to_clipboard(value)
+        self.notify(f"Copied {escape_markup(value)}", title="Copy", timeout=3)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide or grey out actions that cannot apply right now.
+
+        False hides the binding (and lets the key fall through, e.g. escape);
+        None shows it disabled. Either way the key does nothing here.
+        """
+        if action == "clear_filter":
+            return bool(self._query)
+        if self._busy and action not in SAFE_WHILE_BUSY:
+            names = {b.action for b in self.BINDINGS if isinstance(b, Binding)}
+            if action in names:
+                return None  # shown disabled (footer, help, palette), not hidden
+        try:
+            repo = self.repo_mode
+        except Exception:  # pragma: no cover - before mount
+            return True
+        if not repo and action in REPO_ONLY_ACTIONS:
+            return None
+        # A repository fork needs the event to branch from; a file fork without a
+        # step forks the whole run, so it stays enabled there.
+        if repo and action == "fork" and self._selected_step_id is None:
+            return None
+        return True
 
     def action_focus_center(self) -> None:
         self.query_one(StepTree).focus()
@@ -775,6 +1042,7 @@ class OpentineTUI(App):
                 "Replace an existing private key",
                 "Overwriting it destroys the only copy of that signing identity and "
                 "makes every artifact signed with it permanently unverifiable.",
+                "Overwrite key",
             ):
                 self._show_result(result)
                 return
@@ -794,6 +1062,7 @@ class OpentineTUI(App):
         if not await self._confirm(
             "Fork run",
             "This will write a new .tine artifact from the selected step.",
+            "Fork",
         ):
             return
         self._show_result(await self._run_in_thread(self.actions.fork, record.run, step_id))
@@ -1146,8 +1415,8 @@ class OpentineTUI(App):
             self._refresh()
             self._refresh_repo()
 
-    async def _confirm(self, title: str, message: str) -> bool:
-        return bool(await self.push_screen_wait(ConfirmationModal(title, message)))
+    async def _confirm(self, title: str, message: str, confirm_label: str = "Confirm") -> bool:
+        return bool(await self.push_screen_wait(ConfirmationModal(title, message, confirm_label)))
 
     async def _request_harness_options(self, title: str) -> HarnessOptions | None:
         cwd = str(Path.cwd())
@@ -1166,10 +1435,25 @@ class OpentineTUI(App):
         to take the whole dashboard down with the user's context in it.
         """
         self.query_one(StepDetail).set_message("Working", "Action is running...")
+        title = getattr(func, "__name__", "action").replace("_", " ")
+        self._busy += 1
+        scroll = None
+        with contextlib.suppress(Exception):
+            scroll = self.query_one("#detail-scroll")
+            scroll.loading = True
+        self.notify(f"Running {escape_markup(title)}...", timeout=2)
+        self.refresh_bindings()
         try:
             return await asyncio.to_thread(func, *args)
         except Exception as exc:  # report, never crash the dashboard
             return ActionResult(False, "Action failed", f"{type(exc).__name__}: {exc}")
+        finally:
+            self._busy -= 1
+            # The app may be tearing down by the time a long action returns.
+            with contextlib.suppress(Exception):
+                if not self._busy and scroll is not None:
+                    scroll.loading = False
+                self.refresh_bindings()
 
     # -- opentine 0.22-0.34 ------------------------------------------------
 
@@ -1231,6 +1515,7 @@ class OpentineTUI(App):
             "Apply rewind",
             f"Overwrite the files listed under 'restore' in {root}? Files changed since "
             "the run are left alone (conflicts block the whole rewind).",
+            "Rewind files",
         ):
             return
         self._show_result(
@@ -1248,7 +1533,7 @@ class OpentineTUI(App):
             return
         result = await self._run_in_thread(self.actions.view_html, record, out)
         if not result.ok and "already exists" in result.message:
-            if not await self._confirm("Replace HTML file", f"{out} already exists."):
+            if not await self._confirm("Replace HTML file", f"{out} already exists.", "Replace"):
                 self._show_result(result)
                 return
             result = await self._run_in_thread(self.actions.view_html, record, out, True)

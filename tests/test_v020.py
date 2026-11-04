@@ -551,7 +551,7 @@ async def test_search_query_with_bracket_does_not_crash(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_search_cancel_keeps_active_filter(tmp_path: Path):
-    from opentine_tui.dialogs import TextInputModal
+    from opentine_tui.dialogs import SearchModal
 
     runs_dir = tmp_path / ".tine_runs"
     runs_dir.mkdir()
@@ -565,7 +565,7 @@ async def test_search_cancel_keeps_active_filter(tmp_path: Path):
         app._refresh()
         assert app.query_one(RunList).row_count == 1
         await pilot.press("slash")
-        assert await _settle(app, pilot, TextInputModal)
+        assert await _settle(app, pilot, SearchModal)
         await pilot.press("escape")  # cancel, not clear
         await pilot.pause()
         assert app._query == "tag:bug"

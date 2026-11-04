@@ -81,7 +81,12 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `q` | Quit |
 | `?` | Help panel (every binding, including the hidden ones) |
 | `r` | Refresh — drop the scan cache and rescan |
-| `/` | Search / filter runs (`tag:` `model:` `status:completed` `cost:>0.01` `after:` + free text) |
+| `/` | Search / filter runs (`tag:` `model:` `status:completed` `cost:>0.01` `after:` + free text) — live match count, inline errors, `↑`/`↓` recall earlier queries |
+| `Esc` | Clear the active run filter (only while one is set) |
+| `S` | Cycle the run sort: age, cost, steps, status, id (or click a column header) |
+| `g` | Go to a run by id prefix |
+| `Y` | Copy the run id, file path, step id or digest to the clipboard |
+| `Ctrl+P` | Command palette — the dashboard actions available right now, searchable |
 | `[` `]` | Switch the run list between **Files** and **Repository** |
 | `1` `2` `3` | Focus runs / steps / details panel |
 | `↑` `↓` | Browse runs — the step and detail panels follow the highlight |
@@ -100,6 +105,10 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `c` | Write a cached replay from the selected step |
 | `d` | Files: field-level diff. Repository: semantic diff between two runs |
 | `x` | Resume selected run when `manifest.resume` is true |
+| `z` (detail panel focused) | Expand truncated Inputs/Outputs sections |
+| `n` `N` (steps panel) | Next / previous match of the last step search |
+| `!` (steps panel) | Jump to the next failed step |
+| `Ctrl+/` or `Ctrl+_` (steps panel) | Search steps by tool name or text |
 | `h` | Launch a new external harness run |
 | `Ctrl+F` | Fork selected step and launch a harness |
 | `Ctrl+R` | Replay from selected step with a harness |
@@ -113,6 +122,14 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 
 Write operations and external harness launches require an explicit confirmation
 modal before they run.
+
+Keys that cannot apply are shown disabled (footer, `?` help, command palette): repository-only
+actions on the Files tab, a repository fork with no event selected, and every
+write action while another action is still running (the details panel shows a
+loading indicator until it finishes). Each panel's border shows its focus key and
+counts (`Runs [1] (shown/total)`), and the focused panel is outlined in the
+opentine orange; the app registers an `opentine` theme, so `Ctrl+P` theme
+switching (including light themes) recolours everything.
 
 ## What's new for opentine 0.34
 
