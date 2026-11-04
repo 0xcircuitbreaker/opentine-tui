@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from opentine.core import Run, Step
+from textual.binding import Binding
 from textual.widgets import Static
 
 from opentine_tui.formatting import (
@@ -80,14 +81,73 @@ def _billing_line(step: Step) -> list[str]:
     return lines
 
 
+EMPTY_DETAIL = "[dim]Select a step to see its input, output, usage and cost[/]"
+NO_STEPS_DETAIL = (
+    "[dim](no steps recorded, the run may still be in progress; press r to refresh)[/]"
+)
+# A section body longer than either limit is cut until the user expands it.
+SECTION_MAX_LINES = 40
+SECTION_MAX_CHARS = 4000
+TRUNCATION_MARKER = "more lines (z to expand)"
+
+
+def _truncate(text: str, expanded: bool) -> tuple[str, int]:
+    """Cut ``text`` to the section limits; returns (text, hidden line count)."""
+    if expanded:
+        return text, 0
+    lines = text.split("\n")
+    kept = lines[:SECTION_MAX_LINES]
+    out = "\n".join(kept)
+    if len(out) > SECTION_MAX_CHARS:
+        out = out[:SECTION_MAX_CHARS]
+        kept = out.split("\n")
+    hidden = len(lines) - len(kept)
+    if hidden <= 0 and len(out) < len(text):
+        hidden = 1
+    return out, max(hidden, 0)
+
+
+def _section(title: str, color: str, value: Any, expanded: bool) -> list[str]:
+    """A clearly delimited section: header, (possibly truncated) escaped body."""
+    rendered = _render_value(value)
+    total = rendered.count("\n") + 1
+    body, hidden = _truncate(rendered, expanded)
+    glyph = "▸" if hidden else "▾"
+    header = f"[bold {color}]{glyph} {title}[/]"
+    if hidden:
+        header += f"  [dim]({total} lines, collapsed)[/]"
+    out = ["", header, escape(body)]
+    if hidden:
+        out.append(f"[dim]... {hidden} {TRUNCATION_MARKER}[/]")
+    return out
+
+
 class StepDetail(Static):
+    """Detail panel. ``last_rendered`` always holds the joined markup text."""
+
+    can_focus = True
+    BINDINGS = [Binding("z", "expand_detail", "Expand", show=False)]
+
     def __init__(self) -> None:
-        super().__init__("[dim]Select a step to view details[/]")
+        super().__init__(EMPTY_DETAIL)
         self._run: Run | None = None
         self._record: RunRecord | None = None
-        self.last_rendered = "[dim]Select a step to view details[/]"
+        self._step: Step | None = None
+        self.expanded = False
+        self.last_rendered = EMPTY_DETAIL
+
+    def action_expand_detail(self) -> None:
+        self.toggle_expanded()
+
+    def toggle_expanded(self) -> bool:
+        """Flip truncation for the shown step; returns the new expanded state."""
+        self.expanded = not self.expanded
+        if self._run is not None and self._step is not None:
+            self._render_step(self._run, self._step)
+        return self.expanded
 
     def set_run(self, record: RunRecord) -> None:
+        self._step = None
         self._record = record
         run = record.run
         self._run = run
@@ -117,7 +177,7 @@ class StepDetail(Static):
             )
             return
         if not run.steps:
-            self._set_text("[dim](no steps)[/]")
+            self._set_text(NO_STEPS_DETAIL)
             return
         self._show_summary(record)
 
@@ -132,6 +192,7 @@ class StepDetail(Static):
         """
         self._record = None
         self._run = run
+        self._step = None
         lines = [
             f"[bold]Run object:[/] {escape(record.short_id)}",
             f"[dim]{escape(record.oid)}[/]",
@@ -170,6 +231,10 @@ class StepDetail(Static):
         self._set_text("\n".join(lines))
 
     def set_step(self, run: Run, step: Step) -> None:
+        self.expanded = False
+        self._render_step(run, step)
+
+    def _render_step(self, run: Run, step: Step) -> None:
         parent_ids = getattr(step, "parent_ids", None)
         if parent_ids is None:
             parent_id = getattr(step, "parent_id", None)
@@ -193,23 +258,18 @@ class StepDetail(Static):
         tokens = token_summary(getattr(step, "usage", {}))
         if tokens:
             lines.append(f"[bold]Tokens:[/] {escape(tokens)}")
-        lines.extend(
-            [
-                "",
-                "[bold #FF6900]Inputs[/]",
-                escape(_render_value(step.inputs)),
-                "",
-                "[bold #FF6900]Outputs[/]",
-                escape(_render_value(step.outputs)),
-            ]
-        )
+        # Error comes first and is never truncated: it is what the user came for.
         error = getattr(step, "error", {})
         if error:
-            lines.extend(["", "[bold red]Error[/]", escape(_render_value(error))])
+            lines.extend(_section("Error", "red", error, True))
+        lines.extend(_section("Inputs", "#FF6900", step.inputs, self.expanded))
+        lines.extend(_section("Outputs", "#FF6900", step.outputs, self.expanded))
         self._run = run
+        self._step = step
         self._set_text("\n".join(lines))
 
     def set_message(self, title: str, message: str, ok: bool = True) -> None:
+        self._step = None
         color = "green" if ok else "red"
         self._set_text(f"[bold {color}]{escape(title)}[/]\n\n{escape(message)}")
 

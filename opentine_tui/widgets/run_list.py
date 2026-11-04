@@ -64,6 +64,30 @@ def record_flags(record: RunRecord) -> str:
     return " ".join(parts)
 
 
+# (key, label, column index, default descending?) in S cycle order.
+SORT_KEYS: list[tuple[str, str, int, bool]] = [
+    ("age", "age", 4, True),
+    ("cost", "cost", 3, True),
+    ("steps", "steps", 2, True),
+    ("status", "status", 1, False),
+    ("id", "id", 0, False),
+]
+_COLUMN_SORT = {column: key for key, _, column, _ in SORT_KEYS}
+_DEFAULT_REVERSE = {key: reverse for key, _, _, reverse in SORT_KEYS}
+
+
+def sort_value(record: RunRecord, key: str) -> object:
+    if key == "cost":
+        return record.total_cost or 0.0
+    if key == "steps":
+        return record.step_count if record.run else -1
+    if key == "status":
+        return record.status_value
+    if key == "id":
+        return record.short_id
+    return record.mtime or 0.0
+
+
 class RunSelected(Message):
     def __init__(self, run_key: str) -> None:
         super().__init__()
@@ -84,6 +108,37 @@ class RunList(DataTable):
         # the step the user had open, and overwriting an action's result, on every
         # poll tick.
         self._announced: str | None = None
+        self._sort_key = "age"
+        self._sort_reverse = True
+
+    @property
+    def sort_label(self) -> str:
+        """E.g. 'cost ▼' (descending) or 'id ▲'."""
+        return f"{self._sort_key} {'▼' if self._sort_reverse else '▲'}"
+
+    def set_sort(self, key: str, reverse: bool | None = None) -> str:
+        """Sort by ``key`` (age/cost/steps/status/id), repaint, return the label."""
+        if key not in _DEFAULT_REVERSE:
+            raise ValueError(f"unknown sort key: {key}")
+        self._sort_key = key
+        self._sort_reverse = _DEFAULT_REVERSE[key] if reverse is None else reverse
+        self.update_records(self._records)
+        return self.sort_label
+
+    def cycle_sort(self) -> str:
+        """Advance to the next sort key; returns a label like 'cost ▼'."""
+        keys = [key for key, *_ in SORT_KEYS]
+        return self.set_sort(keys[(keys.index(self._sort_key) + 1) % len(keys)])
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        event.stop()
+        key = _COLUMN_SORT.get(event.column_index)
+        if key is None:
+            return
+        if key == self._sort_key:
+            self.set_sort(key, not self._sort_reverse)
+        else:
+            self.set_sort(key)
 
     def on_mount(self) -> None:
         self._ensure_columns()
@@ -94,6 +149,9 @@ class RunList(DataTable):
         # A background rescan must not move the cursor out from under the user, so
         # the highlighted run is restored by key rather than by row index.
         highlighted = self.highlighted_key
+        records = sorted(
+            records, key=lambda r: sort_value(r, self._sort_key), reverse=self._sort_reverse
+        )
         self._records = records
         self.clear()
         now = time.time()
