@@ -28,13 +28,19 @@ if _source:
 
 
 @pytest.fixture(autouse=True)
-def _plain_artifacts(monkeypatch):
-    """Write uncompressed artifacts so tests can read and tamper with the JSON.
+def _compressed_artifacts(monkeypatch):
+    """Run every test with compression ON, as users' artifacts are stored.
 
-    opentine compresses ``.tine`` files by default since 0.11; compression is a
-    storage detail outside every digest, and the dashboard's own reads go through
-    opentine's decompressing reader either way (``test_v034`` covers that path).
+    opentine's own default already compresses; setting it explicitly keeps the
+    suite honest even on a machine whose environment turns it off. Tests that
+    edit an artifact go through ``tests/_artifacts.py``.
     """
+    monkeypatch.setenv("OPENTINE_COMPRESS", "zlib")
+
+
+@pytest.fixture
+def plain_artifacts(monkeypatch):
+    """Uncompressed writes, for the few tests that depend on exact byte sizes."""
     monkeypatch.setenv("OPENTINE_COMPRESS", "0")
 
 

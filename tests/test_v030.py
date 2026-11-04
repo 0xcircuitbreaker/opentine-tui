@@ -27,6 +27,7 @@ from opentine_tui.v3 import V3Repository, short_oid
 from opentine_tui.widgets.repo_list import RepoList
 from opentine_tui.widgets.step_detail import StepDetail
 from opentine_tui.widgets.step_tree import StepTree
+from tests._artifacts import read_doc, write_doc
 
 
 def _run(run_id: str, prompt: str = "ship it") -> Run:
@@ -169,14 +170,13 @@ def test_import_brings_a_v2_file_into_the_repository(workspace):
 
 
 def test_import_refuses_a_tampered_artifact(workspace):
-    import json
 
     _, runs_dir, repository = workspace
     tampered = runs_dir / "tampered.tine"
     _run("tampered").save(tampered)
-    raw = json.loads(tampered.read_text(encoding="utf-8"))
+    raw = read_doc(tampered)
     raw["status"] = "failed"
-    tampered.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(tampered, raw)
 
     result = RepoActionService(repository).import_v2(ImportOptions(source=str(tampered)))
 

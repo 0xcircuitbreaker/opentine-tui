@@ -5,7 +5,6 @@ Each test names the failure it prevents, because every one of these shipped.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +16,7 @@ from opentine_tui.app import OpentineTUI
 from opentine_tui.repository import RunRepository, safe_filename
 from opentine_tui.widgets.step_detail import StepDetail
 from opentine_tui.widgets.step_tree import StepTree
+from tests._artifacts import read_doc, write_doc
 
 HOSTILE = "result [not-a-tag] and [bold red]evil[/] and a dangling [ bracket"
 HMAC_KEY = b"0123456789abcdef0123456789abcdef"
@@ -120,9 +120,9 @@ async def test_a_budget_opentine_refuses_does_not_kill_the_app(
     runs_dir = _runs_dir(tmp_path)
     path = runs_dir / "budget.tine"
     _run("budgeted").save(path)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_doc(path)
     raw.setdefault("manifest", {})["budget"] = budget
-    path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(path, raw)
 
     app = OpentineTUI(runs_dir=runs_dir)
     async with app.run_test() as pilot:

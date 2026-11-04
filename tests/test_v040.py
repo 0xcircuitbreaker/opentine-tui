@@ -7,7 +7,6 @@ branch, declared intent and a 128-bit nonce — and records that basis in
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from opentine.core import Run, RunStatus, StepKind
 from opentine_tui.actions import RunActionService
 from opentine_tui.repository import RunRepository
 from opentine_tui.widgets.step_detail import StepDetail
+from tests._artifacts import read_doc, write_doc
 
 
 def _run(run_id: str = "source") -> Run:
@@ -50,9 +50,9 @@ def test_an_edited_fork_basis_is_reported_as_a_mismatch(service):
     repository, actions, _ = service
     result = actions.fork(_run(), None)
 
-    raw = json.loads(result.path.read_text(encoding="utf-8"))
+    raw = read_doc(result.path)
     raw["metadata"]["fork"]["nonce"] = "0" * 32  # claim a different fork act
-    result.path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(result.path, raw)
 
     record = repository.inspect_path(result.path)
     lines = "\n".join(StepDetail._fork_lines(record.run))
@@ -76,9 +76,9 @@ def test_a_pre_040_fork_gets_no_verdict_rather_than_an_accusation(service):
     repository, actions, _ = service
     result = actions.fork(_run(), None)
 
-    raw = json.loads(result.path.read_text(encoding="utf-8"))
+    raw = read_doc(result.path)
     del raw["metadata"]["fork"]  # what a 0.3.0 fork looks like
-    result.path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(result.path, raw)
 
     record = repository.inspect_path(result.path)
     lines = "\n".join(StepDetail._fork_lines(record.run))
@@ -120,10 +120,10 @@ def test_a_tampered_lineage_is_not_shown_under_a_verified_badge(service):
     repository, actions, _ = service
     result = actions.fork(_run("honest-source"), None)
 
-    raw = json.loads(result.path.read_text(encoding="utf-8"))
+    raw = read_doc(result.path)
     raw["metadata"]["forked_from"] = "trusted-corporate-baseline"
     raw["metadata"]["fork_point"] = "0" * 64
-    result.path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(result.path, raw)
 
     lines = "\n".join(StepDetail._fork_lines(repository.inspect_path(result.path).run))
     assert "identity: [green]verified[/]" in lines
@@ -135,9 +135,9 @@ def test_an_unverifiable_lineage_is_labelled_as_a_claim(service):
     repository, actions, _ = service
     result = actions.fork(_run(), None)
 
-    raw = json.loads(result.path.read_text(encoding="utf-8"))
+    raw = read_doc(result.path)
     del raw["metadata"]["fork"]
-    result.path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(result.path, raw)
 
     lines = "\n".join(StepDetail._fork_lines(repository.inspect_path(result.path).run))
     assert "(claimed)" in lines

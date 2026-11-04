@@ -12,6 +12,7 @@ from opentine.harnesses import HarnessStep
 from opentine_tui import actions
 from opentine_tui.actions import HarnessOptions, RunActionService
 from opentine_tui.repository import RunRepository
+from tests._artifacts import edit_text
 
 
 class DummyHarness:
@@ -73,7 +74,7 @@ def test_verify_ok_and_failure(service: RunActionService, source_run: Run):
     assert ok.ok
     assert "sha256" in ok.message
 
-    path.write_text(path.read_text(encoding="utf-8").replace("done", "changed", 1))
+    edit_text(path, lambda text: text.replace("done", "changed", 1))
     failed = service.verify(path)
     assert not failed.ok
     assert "mismatch" in failed.message

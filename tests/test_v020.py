@@ -6,7 +6,6 @@ Format-v2 migration, tags + search, cost + budget, autosave/drafts, signing
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -26,6 +25,7 @@ from opentine_tui.dialogs import MigrateModal, SignModal, TagEditorModal
 from opentine_tui.repository import RunRepository, filter_records
 from opentine_tui.widgets.run_list import RunList, record_flags
 from opentine_tui.widgets.step_detail import StepDetail
+from tests._artifacts import read_doc, write_doc
 
 try:
     from opentine.signing import HAS_ED25519
@@ -54,13 +54,13 @@ def _write_v1(path: Path, run_id: str = "v1-run") -> Path:
     recomputed v1 digest). Generated in-test so CI does not need the opentine
     source checkout. The 1->2 migration is additive, so this loads/migrates cleanly."""
     _completed_run(run_id).save(path)  # v2
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_doc(path)
     raw["format_version"] = 1
     raw.setdefault("metadata", {})["integrity"] = {
         "algorithm": "sha256",
         "digest": _integrity_digest(raw),
     }
-    path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+    write_doc(path, raw)
     return path
 
 
@@ -83,7 +83,7 @@ def _write_legacy(path: Path, run_id: str = "legacy-run") -> Path:
             {"id": "s2", "kind": "done", "inputs": {"text": "d"}, "outputs": {}, "parent_id": "s1"},
         ],
     }
-    path.write_text(json.dumps(data), encoding="utf-8")
+    write_doc(path, data)
     return path
 
 
@@ -506,9 +506,9 @@ def test_future_version_is_not_corrupt(tmp_path: Path):
     repo = RunRepository(tmp_path)
     path = tmp_path / "future.tine"
     _completed_run("a").save(path)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_doc(path)
     raw["format_version"] = 99
-    path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(path, raw)
 
     record = repo.inspect_path(path)
     assert record.is_future
@@ -521,9 +521,9 @@ def test_migrate_refuses_future_version(tmp_path: Path):
     service = RunActionService(repo)
     path = tmp_path / "future.tine"
     _completed_run("a").save(path)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_doc(path)
     raw["format_version"] = 99
-    path.write_text(json.dumps(raw), encoding="utf-8")
+    write_doc(path, raw)
     result = service.migrate(repo.inspect_path(path))
     assert not result.ok
     assert "newer opentine" in result.message
