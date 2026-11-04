@@ -53,6 +53,7 @@ def test_import_formats_match_the_cli():
     from opentine._cli_import import IMPORT_FORMATS as CLI_FORMATS
 
     assert set(IMPORT_FORMATS) == set(CLI_FORMATS)
+    assert len(IMPORT_FORMATS) == len(set(IMPORT_FORMATS))
 
 
 # -- export ----------------------------------------------------------------

@@ -1,6 +1,6 @@
 [project]
 name = "opentine-tui"
-version = "0.5.0"
+version = "0.34.0"
 description = "Terminal dashboard for opentine — visual management console with Textual"
 readme = "README.md"
 license = "Apache-2.0"
@@ -25,16 +25,17 @@ dependencies = [
     # autosave/drafts, signing, field-level diff); 0.3 added the git-shaped v3
     # repository (objects, refs, fsck, semantic diff), 0.4 made a v2 fork id
     # identify the fork act, and 0.5 added OpenTelemetry GenAI export plus the
-    # trace importers — this dashboard surfaces all of it. The upper bound is
-    # deliberate: opentine states its data-compatibility guarantee per release, not
-    # its API's, and 0.4 already changed fork identity.
-    "opentine>=0.5,<0.6",
+    # trace importers. 0.26 made format v4 the default writer, and 0.22-0.34 added
+    # rewind, the HTML viewer, offline verify, replay fidelity and fork edits —
+    # this dashboard surfaces all of it. The upper bound is deliberate: opentine
+    # states its data-compatibility guarantee per release, not its API's.
+    "opentine>=0.34,<0.35",
     "textual>=3.0,<9",
 ]
 
 [project.optional-dependencies]
 # Ed25519 signing/keygen in the dashboard (HMAC-SHA256 works without it).
-crypto = ["opentine[crypto]>=0.5,<0.6"]
+crypto = ["opentine[crypto]>=0.34,<0.35"]
 dev = [
     "build>=1.2",
     "pytest>=9.0",
@@ -105,6 +106,7 @@ ignore = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 # A warning from opentine or Textual is a signal the dashboard is using a
 # deprecated path; make it fail rather than scroll past.

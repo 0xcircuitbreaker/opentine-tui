@@ -321,3 +321,7 @@ async def test_a_fresh_repository_is_not_told_to_run_tine_init(tmp_path: Path):
         rendered = app.query_one(StepDetail).last_rendered
         assert "Nothing recorded yet" in rendered
         assert "tine init" not in rendered  # advice the user has already taken
+
+
+# These modules pin v2 file semantics (raw-JSON tampering, v2 signatures).
+pytestmark = pytest.mark.usefixtures("legacy_v2")

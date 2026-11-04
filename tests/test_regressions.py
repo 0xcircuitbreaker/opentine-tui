@@ -113,7 +113,9 @@ async def test_merge_step_names_the_parents_it_is_not_drawn_under(tmp_path: Path
     ],
 )
 @pytest.mark.asyncio
-async def test_a_budget_opentine_refuses_does_not_kill_the_app(tmp_path: Path, budget: dict):
+async def test_a_budget_opentine_refuses_does_not_kill_the_app(
+    tmp_path: Path, budget: dict, legacy_v2
+):
     """`run.budget()` raises on these; it used to raise straight out of select_run."""
     runs_dir = _runs_dir(tmp_path)
     path = runs_dir / "budget.tine"

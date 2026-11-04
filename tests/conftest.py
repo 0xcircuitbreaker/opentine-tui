@@ -17,9 +17,28 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 _source = os.environ.get("OPENTINE_SRC")
 if _source:
     _resolved = Path(_source).expanduser().resolve()
     if not (_resolved / "opentine" / "__init__.py").is_file():
         raise RuntimeError(f"OPENTINE_SRC={_source} does not contain an opentine package")
     sys.path.insert(0, str(_resolved))
+
+
+@pytest.fixture(autouse=True)
+def _plain_artifacts(monkeypatch):
+    """Write uncompressed artifacts so tests can read and tamper with the JSON.
+
+    opentine compresses ``.tine`` files by default since 0.11; compression is a
+    storage detail outside every digest, and the dashboard's own reads go through
+    opentine's decompressing reader either way (``test_v034`` covers that path).
+    """
+    monkeypatch.setenv("OPENTINE_COMPRESS", "0")
+
+
+@pytest.fixture
+def legacy_v2(monkeypatch):
+    """Pin the deprecated v2 writer, for tests about v2 file semantics."""
+    monkeypatch.setenv("OPENTINE_FORMAT", "2")

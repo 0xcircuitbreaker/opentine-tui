@@ -238,10 +238,10 @@ class StepDetail(Static):
             f"[bold]Tags:[/] {escape(', '.join(run.tags)) if run.tags else '[dim](none)[/]'}",
         ]
 
-        if record.needs_migration:
+        if record.can_upgrade:
             lines.append(
-                "[yellow]Migratable:[/] re-save upgrades to v2 "
-                "(one-way; 0.1.x can no longer read it). Press 'm'."
+                "[yellow]Migratable:[/] press 'm' to write a format v4 copy "
+                "(the original is kept; readers need opentine >= 0.26)."
             )
 
         lines += self._budget_lines(run)
@@ -253,6 +253,7 @@ class StepDetail(Static):
         lines += ["", "[dim]Prompt:[/]", f"  {escape(run.user_prompt[:200])}"]
 
         lines += self._fork_lines(run)
+        lines += self._v4_lines(record)
         migration = run.metadata.get("migration")
         if migration:
             lines.append("\n[#FF6900]Upgrade history[/]")
@@ -321,6 +322,62 @@ class StepDetail(Static):
             out.append("  identity: [dim]not checkable (basis recorded by a newer opentine)[/]")
         elif source:
             out.append("  identity: [dim]no basis recorded — lineage is unverified[/]")
+        return out
+
+    @staticmethod
+    def _v4_lines(record: RunRecord) -> list[str]:
+        """Format v4 provenance and the 0.26-0.34 records a run can carry."""
+        run = record.run
+        if run is None:
+            return []
+        metadata = getattr(run, "metadata", {}) or {}
+        out: list[str] = []
+        origin = getattr(run, "_v4_origin", None)
+        payload = origin.get("payload") if isinstance(origin, dict) else None
+        upgraded = payload.get("upgraded_from") if isinstance(payload, dict) else None
+        if isinstance(upgraded, dict):
+            out += ["", "[bold #FF6900]Upgraded from[/] [dim](covered by the v4 root)[/]"]
+            out.append(f"  source: {escape(str(upgraded.get('format', '?')))}")
+            digest = upgraded.get("digest")
+            if digest:
+                out.append(f"  bytes: sha256:{escape(short_ref(str(digest)))}")
+            signature = upgraded.get("signature")
+            if isinstance(signature, dict):
+                out.append(
+                    f"  source signature: {escape(str(signature.get('state', '?')))} "
+                    "[dim](a claim made at upgrade time)[/]"
+                )
+            when = upgraded.get("upgraded_at")
+            if when:
+                out.append(f"  at: {escape(str(when))}")
+        edit = metadata.get("edit")
+        if isinstance(edit, dict):
+            changes = edit.get("changes") if isinstance(edit.get("changes"), list) else []
+            paths = ", ".join(
+                str(change.get("path")) for change in changes if isinstance(change, dict)
+            )
+            out += ["", "[bold #FF6900]Edited fork[/]"]
+            out.append(f"  step {escape(short_ref(str(edit.get('step', '?'))))}: {escape(paths)}")
+            if edit.get("executed") is False:
+                out.append("  [dim]the edited step was recorded, not executed[/]")
+        originals = metadata.get("file_originals")
+        if isinstance(originals, dict) and originals:
+            out.append(
+                f"\n[bold]File originals:[/] {len(originals)} stored "
+                "[dim](exact rewind available — press 'w')[/]"
+            )
+        warnings = metadata.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            out += ["", "[bold yellow]Warnings[/]"]
+            out += [f"  [yellow]! {escape(str(item)[:160])}[/]" for item in warnings[:5]]
+            if len(warnings) > 5:
+                out.append(f"  [dim]… and {len(warnings) - 5} more[/]")
+        sidecar = record.path.with_name(record.path.name + ".timestamps.json")
+        if sidecar.is_file():
+            out.append(
+                "\n[bold]Timestamps:[/] RFC 3161 tokens attached "
+                "[dim](press 'V' for the offline report)[/]"
+            )
         return out
 
     @staticmethod
@@ -491,8 +548,8 @@ class StepDetail(Static):
             return []
         out = ["", "[bold #FF6900]Integrity[/]"]
         if integrity.ok:
-            digest = (integrity.actual or integrity.expected or "")[:12]
-            out.append(f"  [green]OK[/] sha256:{digest}")
+            digest = short_ref(integrity.actual or integrity.expected or "")
+            out.append(f"  [green]OK[/] sha256:{escape(digest)}")
         elif record.is_legacy:
             out.append("  [yellow]legacy 0.1.0[/] — no verifiable digest; migrate to import")
         else:

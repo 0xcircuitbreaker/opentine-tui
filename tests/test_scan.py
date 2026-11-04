@@ -58,7 +58,7 @@ def test_rewritten_artifact_is_reinspected(tmp_path: Path):
     assert repository.list_records()[0].run.id == "run-b"
 
 
-def test_explicit_invalidation_forces_a_reread(tmp_path: Path):
+def test_explicit_invalidation_forces_a_reread(tmp_path: Path, legacy_v2):
     runs_dir = tmp_path / ".tine_runs"
     runs_dir.mkdir()
     path = runs_dir / "run.tine"

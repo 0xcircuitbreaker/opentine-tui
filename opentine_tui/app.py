@@ -23,16 +23,17 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 
 from opentine_tui.actions import (
-    FORMAT_VERSION,
     ActionResult,
     HarnessOptions,
     RunActionService,
+    step_label,
 )
 from opentine_tui.dialogs import (
     BudgetModal,
     ConfirmationModal,
     EvaluateModal,
     ExportModal,
+    ForkEditModal,
     HarnessOptionsModal,
     ImportModal,
     MigrateModal,
@@ -145,7 +146,7 @@ class OpentineTUI(App):
             "migrate",
             "Migrate",
             show=False,
-            tooltip="Upgrade a v1/legacy artifact to v2 (one-way)",
+            tooltip="Upgrade a v1/v2/legacy artifact to format v4 (original kept)",
         ),
         Binding("s", "sign", "Sign", show=False, tooltip="Sign a completed run (HMAC or Ed25519)"),
         Binding("k", "keygen", "Keygen", show=False, tooltip="Generate an Ed25519 keypair"),
@@ -211,6 +212,42 @@ class OpentineTUI(App):
             "Inspect object",
             show=False,
             tooltip="Show a verified v3 object by id",
+        ),
+        # opentine 0.22-0.34
+        Binding(
+            "V",
+            "verify_report",
+            "Verify report",
+            show=False,
+            tooltip="tine verify --offline: every check that needs no network, as a report",
+        ),
+        Binding(
+            "y",
+            "replay_verify",
+            "Replay fidelity",
+            show=False,
+            tooltip="tine replay --verify: does a cached replay reproduce the run, per step",
+        ),
+        Binding(
+            "F",
+            "fork_edit",
+            "Fork with edit",
+            show=False,
+            tooltip="Fork from the selected step with its input/model/tool args edited",
+        ),
+        Binding(
+            "w",
+            "rewind",
+            "Rewind",
+            show=False,
+            tooltip="tine rewind: restore the files this run edited to the selected step",
+        ),
+        Binding(
+            "H",
+            "view_html",
+            "HTML view",
+            show=False,
+            tooltip="tine view: write a self-contained HTML page for the run",
         ),
         # interop (0.5.0)
         Binding(
@@ -662,7 +699,7 @@ class OpentineTUI(App):
         if record.run is None or record.is_future:
             self._show_result(await self._run_in_thread(self.actions.migrate, record))
             return
-        if record.on_disk_version is not None and record.on_disk_version >= FORMAT_VERSION:
+        if record.is_v4 or record.is_draft:
             self._show_result(await self._run_in_thread(self.actions.migrate, record))
             return
         result = await self.push_screen_wait(
@@ -681,6 +718,7 @@ class OpentineTUI(App):
                 record,
                 result.get("force", False),
                 result.get("save_path"),
+                result.get("in_place", False),
             )
         )
 
@@ -1082,5 +1120,94 @@ class OpentineTUI(App):
         )
 
     async def _run_in_thread(self, func, *args) -> ActionResult:
+        """Run an action off the event loop; an exception becomes a failed result.
+
+        An exception escaping a ``@work`` worker exits a Textual app, so one
+        unexpected error in an action (a full disk mid-save, a library bug) used
+        to take the whole dashboard down with the user's context in it.
+        """
         self.query_one(StepDetail).set_message("Working", "Action is running...")
-        return await asyncio.to_thread(func, *args)
+        try:
+            return await asyncio.to_thread(func, *args)
+        except Exception as exc:  # report, never crash the dashboard
+            return ActionResult(False, "Action failed", f"{type(exc).__name__}: {exc}")
+
+    # -- opentine 0.22-0.34 ------------------------------------------------
+
+    @work
+    async def action_verify_report(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        self._show_result(await self._run_in_thread(self.actions.verify_report, record))
+
+    @work
+    async def action_replay_verify(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        self._show_result(await self._run_in_thread(self.actions.replay_verify, record))
+
+    @work
+    async def action_fork_edit(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        step = record.run.get_step(self._selected_step_id) if self._selected_step_id else None
+        step = step or (record.run.steps[-1] if record.run.steps else None)
+        if step is None:
+            self._show_result(ActionResult(False, "Fork failed", "The run has no steps."))
+            return
+        edits = await self.push_screen_wait(ForkEditModal(step_label(step)))
+        if edits is None:
+            return
+        self._show_result(
+            await self._run_in_thread(
+                self.actions.fork_edit,
+                record,
+                step.id,
+                edits["sets"],
+                edits["unsets"],
+                edits["save_path"],
+            )
+        )
+
+    @work
+    async def action_rewind(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        root = await self.push_screen_wait(
+            TextInputModal("Rewind files under", "working tree root", value=str(Path.cwd()))
+        )
+        if not root:
+            return
+        step = self._selected_step_id
+        plan = await self._run_in_thread(self.actions.rewind, record, step, root, False)
+        self._show_result(plan)
+        if not plan.ok or "restore (" not in plan.message:
+            return
+        if not await self._confirm(
+            "Apply rewind",
+            f"Overwrite the files listed under 'restore' in {root}? Files changed since "
+            "the run are left alone (conflicts block the whole rewind).",
+        ):
+            return
+        self._show_result(await self._run_in_thread(self.actions.rewind, record, step, root, True))
+
+    @work
+    async def action_view_html(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        default = str(record.path.with_suffix(".html"))
+        out = await self.push_screen_wait(TextInputModal("Write HTML view", "path", value=default))
+        if not out:
+            return
+        result = await self._run_in_thread(self.actions.view_html, record, out)
+        if not result.ok and "already exists" in result.message:
+            if not await self._confirm("Replace HTML file", f"{out} already exists."):
+                self._show_result(result)
+                return
+            result = await self._run_in_thread(self.actions.view_html, record, out, True)
+        self._show_result(result)

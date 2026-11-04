@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from opentine_tui.actions import ActionResult
+from opentine_tui.cli_bridge import arg_path, run_tine
 
 try:
     from opentine import to_otel_genai_document
@@ -44,7 +45,14 @@ except Exception:  # pragma: no cover - defensive
 FRAMEWORK_FORMATS = ("langchain", "llamaindex", "autogen", "crewai", "openai-agents")
 #: Every ``--format`` ``tine import`` accepts. A drift test pins this to the CLI's
 #: own list, so a format added there fails the suite rather than going unnoticed.
-IMPORT_FORMATS = ("otel-json", "otel-spans", "jsonl", *FRAMEWORK_FORMATS)
+NATIVE_FORMATS = ("otel-json", "otel-spans", "jsonl", *FRAMEWORK_FORMATS)
+try:  # 0.19-0.34 added session logs (Claude Code, Codex, Gemini, ...), ATIF, OTel logs
+    from opentine._cli_import import IMPORT_FORMATS as _CLI_FORMATS
+except Exception:  # pragma: no cover - defensive
+    _CLI_FORMATS = ("auto", *NATIVE_FORMATS)
+#: Formats the dashboard reads in-process come first; the rest go through
+#: ``tine import`` itself, so every reader opentine ships is reachable.
+IMPORT_FORMATS = (*NATIVE_FORMATS, *(f for f in _CLI_FORMATS if f not in NATIVE_FORMATS))
 DEFAULT_REF = "heads/main"
 
 #: Import and export both raise these for "this payload cannot be read/written".
@@ -190,6 +198,9 @@ class InteropService:
         if out is not None and out.exists() and not options.overwrite:
             return _fail("Import blocked", f"{out} already exists; enable Overwrite to replace it.")
 
+        if options.source_format not in NATIVE_FORMATS:
+            return self._import_with_cli(source, out, options)
+
         try:
             events = read_events(source, options.source_format)
         except INTEROP_ERRORS as exc:
@@ -221,7 +232,33 @@ class InteropService:
         if out is not None:
             lines.append(f"Saved: {out}")
         lines.append(f"Recorded into {where}.")
-        lines.append("[dim]Capture is off — the provenance belongs to the source machine.[/]")
+        lines.append("Capture is off — the provenance belongs to the source machine.")
+        return ActionResult(True, "Imported", "\n".join(lines), path=out, refresh=True)
+
+    def _import_with_cli(
+        self, source: Path, out: Path | None, options: TraceImportOptions
+    ) -> ActionResult:
+        argv = ["import", arg_path(source), "--format", options.source_format, "--json"]
+        if out is not None:
+            argv += ["--save", arg_path(out)]
+            if options.overwrite:
+                argv.append("--force")
+        if options.into_repository and self.v3 is not None:
+            argv += ["--repo", arg_path(self.v3.worktree), "--ref", options.ref or DEFAULT_REF]
+        result = run_tine(argv)
+        payload = result.json()
+        if not result.ok or not isinstance(payload, dict):
+            return _fail("Import failed", result.text or f"tine exited {result.returncode}")
+        run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+        lines = [
+            f"{payload.get('events_imported', '?')} event(s) from {source.name} "
+            f"as {payload.get('format', options.source_format)}",
+            f"Run: {run.get('id', '?')}",
+        ]
+        if payload.get("saved_to"):
+            lines.append(f"Saved: {payload['saved_to']}")
+        if payload.get("repo"):
+            lines.append(f"Recorded into repository ref {payload.get('ref')}.")
         return ActionResult(True, "Imported", "\n".join(lines), path=out, refresh=True)
 
     @staticmethod

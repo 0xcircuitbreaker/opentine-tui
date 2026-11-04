@@ -371,3 +371,7 @@ def test_parse_scores_accepts_pairs_and_rejects_junk():
         parse_scores("quality")
     with pytest.raises(ValueError):
         parse_scores("quality=high")
+
+
+# These modules pin v2 file semantics (raw-JSON tampering, v2 signatures).
+pytestmark = pytest.mark.usefixtures("legacy_v2")

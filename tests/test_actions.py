@@ -76,7 +76,7 @@ def test_verify_ok_and_failure(service: RunActionService, source_run: Run):
     path.write_text(path.read_text(encoding="utf-8").replace("done", "changed", 1))
     failed = service.verify(path)
     assert not failed.ok
-    assert "digest mismatch" in failed.message
+    assert "mismatch" in failed.message
 
 
 def test_fork_writes_new_run(service: RunActionService, source_run: Run):
@@ -146,7 +146,7 @@ def test_harness_launch_uses_options_and_saves_completed_run(
         HarnessOptions(
             harness="codex",
             prompt="inspect repo",
-            cwd="/tmp/work",
+            cwd=str(Path(__file__).parent),
             command_override="agent run",
             extra_args=("--json",),
             login_env=True,
@@ -162,7 +162,7 @@ def test_harness_launch_uses_options_and_saves_completed_run(
     assert DummyHarness.seen == {
         "command": ["agent", "run"],
         "extra_args": ("--json",),
-        "cwd": "/tmp/work",
+        "cwd": str(Path(__file__).parent),
         "login_env": True,
         "env_allowlist": ("TOKEN",),
     }

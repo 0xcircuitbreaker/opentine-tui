@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from opentine_tui.actions import ActionResult
+from opentine_tui.cli_bridge import arg_path, run_tine
 from opentine_tui.formatting import cost_str, duration_str, short_ref
+from opentine_tui.repository import is_v4_artifact, read_raw
 from opentine_tui.v3 import REPO_ERRORS, RepoRunRecord, V3Repository, short_oid
 
 try:  # migrate-v3 refuses a tampered source with this, and it is not a ValueError
@@ -174,6 +176,8 @@ class RepoActionService:
         source = Path(options.source).expanduser()
         if not source.is_file():
             return ActionResult(False, "Import failed", f"Not a file: {source}")
+        if is_v4_artifact(read_raw(source)):
+            return self._import_v4(source, options)
         try:
             result = self.repo.repo.migrate_v2(
                 source,
@@ -194,6 +198,36 @@ class RepoActionService:
                 f"{source.name} -> {short_oid(result.run_id)}\n"
                 f"{len(result.event_map)} events, ref {options.ref or '(none)'}\n"
                 f"The original bytes are retained as a legacy blob.{note}"
+            ),
+            refresh=True,
+        )
+
+    def _import_v4(self, source: Path, options: ImportOptions) -> ActionResult:
+        """A v4 file *is* v3 envelopes: ``tine import`` installs them unchanged.
+
+        The oids stay the same, its annotation chain is adopted, and its
+        ``tine-sig/3`` blocks go to the repository's signature sidecar. The v4
+        reader re-derives every oid first, so a tampered file is refused there
+        (there is no "allow unverified" for v4).
+        """
+        argv = ["import", arg_path(source), "--repo", arg_path(self.repo.worktree), "--json"]
+        if options.ref:
+            argv += ["--ref", options.ref]
+        result = run_tine(argv)
+        payload = result.json()
+        if not result.ok or not isinstance(payload, dict):
+            return ActionResult(
+                False, "Import refused", result.text or f"tine exited {result.returncode}"
+            )
+        root = str(payload.get("root") or "?")
+        return ActionResult(
+            True,
+            "Imported into the repository",
+            (
+                f"{source.name} -> {short_oid(root)} (format v4: same oids)\n"
+                f"{payload.get('objects_written', 0)} new object(s), "
+                f"ref {payload.get('ref') or '(none)'}, "
+                f"{payload.get('signatures', 0)} signature block(s) kept"
             ),
             refresh=True,
         )
@@ -311,7 +345,7 @@ class RepoActionService:
             (
                 f"{rendered}\nattestation {short_oid(oid)} signed by "
                 f"{options.signer or 'dashboard'}\n"
-                "[dim]signer is a label, not a verified identity[/]"
+                "(signer is a label, not a verified identity)"
             ),
             refresh=True,
         )

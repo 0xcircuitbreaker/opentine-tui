@@ -53,7 +53,9 @@ def record_flags(record: RunRecord) -> str:
     elif record.is_legacy:
         parts.append("[yellow]L[/]")  # legacy 0.1.0, importable
     elif record.on_disk_version == 1:
-        parts.append("[yellow]1[/]")  # v1, re-save upgrades to v2
+        parts.append("[yellow]1[/]")  # v1, 'm' writes a v4 copy
+    elif record.on_disk_version == 2:
+        parts.append("[dim]2[/]")  # v2: fully supported, 'm' writes a v4 copy
     if record.is_draft:
         parts.append("[yellow]D[/]")
     if record.has_signature:

@@ -11,18 +11,24 @@ from typing import Any
 
 from opentine.core import Run, Step
 
+from opentine_tui.cli_bridge import arg_path, run_tine
 from opentine_tui.formatting import short_ref
-from opentine_tui.repository import RunRecord, RunRepository, verify_integrity
+from opentine_tui.repository import (
+    ARTIFACT_V4_VERSION,
+    RunRecord,
+    RunRepository,
+    current_format,
+    verify_integrity,
+)
 
 try:
     import opentine.signing as signing
 except Exception:  # pragma: no cover - defensive
     signing = None
 
-try:
-    from opentine._canon import FORMAT_VERSION
-except Exception:  # pragma: no cover - defensive
-    FORMAT_VERSION = 2
+#: Kept for callers that imported it: the format a save writes *now* (4 since
+#: opentine 0.26, unless OPENTINE_FORMAT=2 pins the deprecated writer).
+FORMAT_VERSION = current_format()
 
 try:
     from opentine.redaction import redact_value
@@ -35,38 +41,27 @@ except Exception:  # pragma: no cover - defensive
     LEGACY_VERSION = 0
 
 try:
-    from opentine.harnesses import (
-        ClaudeCodeHarness,
-        CodexCLIHarness,
-        CursorHarness,
-        GeminiCLIHarness,
-        GenericHarness,
-        GrokBuildHarness,
-        HermesHarness,
-        KimiCodeHarness,
-        OpenClawHarness,
-        OpenCodeHarness,
-        OpentineHarness,
-        PiHarness,
-    )
-except ModuleNotFoundError:
+    from opentine.harnesses import OpentineHarness
+except ModuleNotFoundError:  # pragma: no cover - opentine without harnesses
     OpentineHarness = None
-    HARNESS_FACTORIES = {}
-else:
-    HARNESS_FACTORIES = {
-        "claude-code": ClaudeCodeHarness,
-        "codex": CodexCLIHarness,
-        "cursor": CursorHarness,
-        # 0.3.0 adds these two as table-driven presets (opentine.harnesses._presets).
-        "gemini": GeminiCLIHarness,
-        "generic": GenericHarness,
-        "grok": GrokBuildHarness,
-        "hermes": HermesHarness,
-        "kimi-code": KimiCodeHarness,
-        "openclaw": OpenClawHarness,
-        "opencode": OpenCodeHarness,
-        "pi": PiHarness,
-    }
+
+try:
+    # The CLI's own registry: 25 harnesses in 0.34 (aider, amp, goose, kiro, ...).
+    # Reading it instead of a hand-kept list means a preset opentine adds shows up
+    # in the dashboard without a release here.
+    from opentine._cli_common import HARNESS_FACTORIES as _CLI_FACTORIES
+except Exception:  # pragma: no cover - defensive
+    _CLI_FACTORIES = {}
+
+HARNESS_FACTORIES: dict[str, Any] = dict(_CLI_FACTORIES) if OpentineHarness is not None else {}
+
+#: Harnesses that have no default command and need the user to name one.
+COMMAND_REQUIRED = frozenset({"generic", "pi"})
+
+try:  # the context the CLI hands a fork/rerun: the history LEADING TO the point
+    from opentine._cli_common import _run_context as _cli_run_context
+except Exception:  # pragma: no cover - defensive
+    _cli_run_context = None
 
 
 @dataclass(slots=True)
@@ -79,6 +74,9 @@ class HarnessOptions:
     login_env: bool = False
     env_allowlist: tuple[str, ...] = field(default_factory=tuple)
     save_path: str | Path | None = None
+    # None keeps opentine's own bound (an hour); a harness that hangs otherwise
+    # holds a worker thread for as long as the dashboard is open.
+    timeout_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -175,11 +173,20 @@ def resolve_step_ref(run: Run, ref: str | None) -> str:
 
 
 def run_context(run: Run, from_step: str | None = None) -> dict[str, Any]:
+    """What a harness is told about the run it continues or re-runs.
+
+    The context of a fork is the history *leading to* the fork point — its
+    ancestor closure — which is what ``tine fork --harness`` sends. Before 0.34
+    this sent the descendant closure instead: the discarded future after the
+    fork point, i.e. exactly the steps the user had chosen to throw away.
+    """
+    if _cli_run_context is not None:
+        return _cli_run_context(run, from_step)
     if from_step is None:
         steps = run.steps
     else:
         start = run.graph.resolve(from_step)
-        keep = run.graph.descendant_closure(start)
+        keep = {start, *run.graph.ancestors(start)} if hasattr(run.graph, "ancestors") else {start}
         steps = [step for step in run.steps if step.id in keep]
 
     return {
@@ -310,10 +317,12 @@ class RunActionService:
         result = verify_integrity(path)
         if result.ok:
             digest = result.actual or result.expected or ""
+            # A v4 file's digest is its root, `run:sha256:<hex>`; a v2 one is bare
+            # hex. Either way the comparable part is the hex.
             return ActionResult(
                 True,
                 "Verify OK",
-                f"OK {path}\nsha256:{digest[:12]}",
+                f"OK {path}\nsha256:{short_ref(digest)}",
                 path=path,
             )
 
@@ -402,12 +411,15 @@ class RunActionService:
         record: RunRecord,
         force: bool = False,
         save_path: str | Path | None = None,
+        in_place: bool = False,
     ) -> ActionResult:
-        """Upgrade a v1/legacy artifact to the current format (one-way).
+        """Upgrade a v1/v2/legacy artifact to format v4 — ``tine migrate``.
 
-        ``save_path`` writes the upgrade beside the original instead of over it,
-        which is what ``tine migrate --save`` does; an existing destination is
-        refused rather than replaced.
+        Since 0.26 ``tine migrate`` writes ``NAME.v4.tine`` beside the original and
+        never touches it; ``in_place`` is the explicit ``--in-place``, which keeps
+        a ``NAME.tine.v2.bak``. The CLI is run as-is so the upgrade carries the
+        same ``upgraded_from`` provenance (source digest and the source signature
+        verdict, recorded as a claim) that ``tine migrate`` records.
         """
         path = record.path
         if record.is_future:
@@ -416,40 +428,67 @@ class RunActionService:
             )
         if record.run is None:
             return _fail("Migrate failed", record.error_message or "unreadable", path)
-        if record.on_disk_version is not None and record.on_disk_version >= FORMAT_VERSION:
-            return _fail("Migrate skipped", f"Already current (v{FORMAT_VERSION}).", path)
-        # Non-legacy sources must pass integrity first (parity with `tine migrate`).
-        if record.on_disk_version != LEGACY_VERSION:
+        if record.is_v4:
+            return _fail("Migrate skipped", f"Already format v{ARTIFACT_V4_VERSION}.", path)
+        if record.is_draft:
+            return _fail(
+                "Migrate refused",
+                "Draft checkpoints stay v2 (v4 has no draft marker); migrate the final run.",
+                path,
+            )
+        if not record.is_legacy:
             integrity = record.integrity
             if integrity is not None and not integrity.ok and not force:
                 return _fail(
-                    "Migrate blocked",
-                    "Source integrity check failed; re-run with Force.",
-                    path,
+                    "Migrate blocked", "Source integrity check failed; re-run with Force.", path
                 )
-        destination = Path(save_path).expanduser() if save_path else path
-        if destination != path and destination.exists() and not force:
+        if in_place and save_path:
+            return _fail("Migrate refused", "Choose a save path or in-place, not both.", path)
+        destination = (
+            path
+            if in_place
+            else Path(save_path).expanduser()
+            if save_path
+            else path.with_name(f"{path.name.removesuffix('.tine')}.v4.tine")
+        )
+        if not in_place and destination.exists() and not force:
             return _fail(
                 "Migrate blocked",
                 f"{destination} already exists; enable Force to replace it.",
                 path,
             )
-        try:
-            run = Run.load(path)  # auto-migrates in memory
-            saved = self.repository.save(run, destination)  # persists the upgrade
-        except Exception as exc:
-            return _fail("Migrate failed", f"{type(exc).__name__}: {exc}", path)
-        note = "\nSignature was dropped — re-sign with 's'." if record.has_signature else ""
+        argv = ["migrate", arg_path(path), "--to", "v4"]
+        if in_place:
+            argv.append("--in-place")
+        else:
+            argv += ["--output", arg_path(destination)]
+        if force:
+            argv.append("--force")
+        result = run_tine(argv, env=self._child_env())
+        if not result.ok:
+            return _fail("Migrate failed", result.text or f"tine exited {result.returncode}", path)
+        note = ""
+        if record.has_signature:
+            note += (
+                "\nThe source signature was checked and recorded as a claim in "
+                "upgraded_from; the v4 file itself is unsigned — re-sign with 's'."
+            )
         if record.is_legacy:
             note += "\nLegacy import recomputed step ids (best-effort)."
+        if in_place:
+            note += f"\nBackup: {path.name}.v2.bak"
         return ActionResult(
             True,
             "Migrated",
-            f"Upgraded {record.version_label} -> v{FORMAT_VERSION}\nSaved: {saved}{note}",
-            run=run,
-            path=saved,
+            f"Upgraded {record.version_label} -> v{ARTIFACT_V4_VERSION}\n"
+            f"Saved: {destination}{note}\n\n{result.text}",
+            path=destination,
             refresh=True,
         )
+
+    def _child_env(self) -> dict[str, str]:
+        """Point a child ``tine`` at the directory this dashboard is showing."""
+        return {"OPENTINE_RUNS_DIR": str(self.repository.runs_dir.resolve())}
 
     def set_tags(self, record: RunRecord, add: list[str], remove: list[str]) -> ActionResult:
         run = record.run
@@ -471,7 +510,7 @@ class RunActionService:
         # the digest and the signed view). Re-saving through Run.save would instead
         # recompute the digest, drop the signature, and upgrade a v1 file to v2.
         try:
-            saved = self.repository.write_tags(record.path, run.tags)
+            saved, signature_kept = self.repository.write_tags(record.path, run.tags)
         except Exception as exc:
             # The mutation lives on the cached Run the dashboard keeps handing out;
             # leaving it applied after a failed write means a later, unrelated save
@@ -481,14 +520,23 @@ class RunActionService:
         note = ""
         if _redacts(run.tags):
             note = (
-                "\n[yellow]One of these tags looks like a credential. It is written "
+                "\nOne of these tags looks like a credential. It is written "
                 "verbatim here, but opentine's redactor rewrites it the next time "
-                "anything re-saves this run.[/]"
+                "anything re-saves this run."
             )
+        if not signature_kept:
+            where = (
+                "(outside the integrity digest; the signature covered the tags and was "
+                "removed — re-sign with 's')"
+            )
+        elif record.has_signature:
+            where = "(outside digest and signature — both preserved)"
+        else:
+            where = "(outside the integrity digest — preserved)"
         return ActionResult(
             True,
             "Tags updated",
-            f"Tags: {tags}\nSaved: {saved}\n(outside digest/signature — both preserved){note}",
+            f"Tags: {tags}\nSaved: {saved}\n{where}{note}",
             run=run,
             path=saved,
             refresh=True,
@@ -522,7 +570,7 @@ class RunActionService:
             return _fail("Set budget failed", f"{type(exc).__name__}: {exc}", record.path)
         note = " and dropped the signature" if record.has_signature else ""
         migr = (
-            f"\nUpgraded {record.version_label} -> v{FORMAT_VERSION}."
+            f"\nUpgraded {record.version_label} -> v{current_format()}."
             if record.needs_migration
             else ""
         )
@@ -573,7 +621,7 @@ class RunActionService:
         except Exception as exc:
             return _fail("Sign failed", f"{type(exc).__name__}: {exc}", record.path)
         migr = (
-            f"\nUpgraded {record.version_label} -> v{FORMAT_VERSION}."
+            f"\nUpgraded {record.version_label} -> v{current_format()}."
             if record.needs_migration
             else ""
         )
@@ -717,6 +765,7 @@ class RunActionService:
                 "Installed opentine does not expose external harness support.",
             )
         try:
+            self._check_destination(options)
             harness = self._harness_from_options(options)
         except Exception as exc:
             return ActionResult(False, "Harness rejected", str(exc))
@@ -757,6 +806,7 @@ class RunActionService:
             step_id = resolve_step_ref(run, step_ref)
             forked = run.fork(step_id)
             forked.metadata["next_harness"] = options.harness
+            self._check_destination(options)
             harness = self._harness_from_options(options)
         except Exception as exc:
             return ActionResult(False, "Fork harness rejected", str(exc))
@@ -800,6 +850,7 @@ class RunActionService:
             )
         try:
             start = resolve_step_ref(run, step_ref) if step_ref is not None else None
+            self._check_destination(options)
             harness = self._harness_from_options(options)
         except Exception as exc:
             return ActionResult(False, "Replay harness rejected", str(exc))
@@ -822,21 +873,182 @@ class RunActionService:
             refresh=True,
         )
 
+    # -- opentine 0.22-0.34 features, driven through `tine` ---------------
+
+    def _tine(self, title: str, argv: list[str]) -> tuple[Any, ActionResult | None]:
+        result = run_tine(argv, env=self._child_env())
+        payload = result.json() if "--json" in argv else None
+        if payload is None and not result.ok:
+            return None, _fail(title, result.text or f"tine exited {result.returncode}")
+        return (payload if payload is not None else result), None
+
+    def verify_report(self, record: RunRecord, strict: bool = False) -> ActionResult:
+        argv = ["verify", arg_path(record.path), "--offline", "--json"]
+        if strict:
+            argv.append("--strict")
+        payload, failure = self._tine("Verify report failed", argv)
+        if failure:
+            return failure
+        if not isinstance(payload, dict):
+            return _fail("Verify report failed", "tine returned no report", record.path)
+        ok = payload.get("verdict") == "pass" or bool(payload.get("ok"))
+        return ActionResult(
+            ok,
+            f"Offline verify: {payload.get('verdict', '?')}",
+            verify_report_text(payload),
+            path=record.path,
+        )
+
+    def replay_verify(self, record: RunRecord) -> ActionResult:
+        payload, failure = self._tine(
+            "Replay verify failed", ["replay", arg_path(record.path), "--verify", "--json"]
+        )
+        if failure:
+            return failure
+        if not isinstance(payload, dict):
+            return _fail("Replay verify failed", "tine returned no result", record.path)
+        overall = (payload.get("fidelity") or {}).get("overall", "?")
+        return ActionResult(
+            bool(payload.get("ok")),
+            f"Replay fidelity: {overall}",
+            fidelity_text(payload),
+            path=record.path,
+        )
+
+    def fork_edit(
+        self,
+        record: RunRecord,
+        step_ref: str | None,
+        sets: list[str],
+        unsets: list[str],
+        save_path: str | None = None,
+    ) -> ActionResult:
+        """``tine fork --from-step K --set PATH=VALUE --unset PATH`` (0.28/0.33)."""
+        run = record.run
+        if run is None:
+            return _fail("Fork failed", "Run is not loaded.", record.path)
+        if not sets and not unsets:
+            return _fail("Fork failed", "Give at least one --set or --unset edit.", record.path)
+        try:
+            step_id = resolve_step_ref(run, step_ref)
+        except Exception as exc:
+            return _fail("Fork failed", str(exc), record.path)
+        out = (
+            Path(save_path).expanduser()
+            if save_path
+            else (self.repository.runs_dir / f"{record.path.stem}.edit-{short_id(step_id)}.tine")
+        )
+        if out.exists():
+            return _fail(
+                "Fork blocked", f"{out} already exists; choose another save path.", record.path
+            )
+        argv = ["fork", arg_path(record.path), "--from-step", step_id, "--save", arg_path(out)]
+        for item in sets:
+            argv += ["--set", item]
+        for item in unsets:
+            argv += ["--unset", item]
+        result = run_tine(argv, env=self._child_env())
+        if not result.ok:
+            return _fail(
+                "Fork failed", result.text or f"tine exited {result.returncode}", record.path
+            )
+        return ActionResult(
+            True,
+            "Forked with edits",
+            f"Saved: {out}\nThe edited step is recorded unexecuted; "
+            f"the edit log is bound into the fork id.\n\n{result.text}",
+            path=out,
+            refresh=True,
+        )
+
+    def rewind(
+        self,
+        record: RunRecord,
+        step_ref: str | None,
+        root: str,
+        apply: bool = False,
+    ) -> ActionResult:
+        """``tine rewind RUN@STEP --root DIR [--apply]`` (0.22/0.32). Dry run by default."""
+        run = record.run
+        if run is None:
+            return _fail("Rewind failed", "Run is not loaded.", record.path)
+        try:
+            step_id = resolve_step_ref(run, step_ref)
+        except Exception as exc:
+            return _fail("Rewind failed", str(exc), record.path)
+        index = next(i for i, step in enumerate(run.steps) if step.id == step_id)
+        directory = Path(root).expanduser()
+        if not directory.is_dir():
+            return _fail("Rewind failed", f"Not a directory: {root}", record.path)
+        argv = [
+            "rewind",
+            f"{arg_path(record.path)}@{index}",
+            "--root",
+            arg_path(directory),
+            "--json",
+        ]
+        if apply:
+            argv.append("--apply")
+        payload, failure = self._tine("Rewind failed", argv)
+        if failure:
+            return failure
+        if not isinstance(payload, dict):
+            return _fail("Rewind failed", "tine returned no plan", record.path)
+        blocked = bool(payload.get("conflict"))
+        title = (
+            "Rewound"
+            if payload.get("applied")
+            else "Rewind blocked by conflicts"
+            if apply
+            else "Rewind plan"
+        )
+        return ActionResult(not (apply and blocked), title, rewind_text(payload), path=record.path)
+
+    def view_html(self, record: RunRecord, out: str, overwrite: bool = False) -> ActionResult:
+        """``tine view RUN -o FILE`` (0.24): a self-contained HTML page for the run."""
+        target = Path(out).expanduser()
+        if target.is_dir():
+            return _fail(
+                "View failed", f"{target} is a directory; give an .html path.", record.path
+            )
+        if target.exists() and not overwrite:
+            return _fail("View blocked", f"{target} already exists; enable Overwrite.", record.path)
+        result = run_tine(
+            ["view", arg_path(record.path), "--output", arg_path(target)], env=self._child_env()
+        )
+        if not result.ok:
+            return _fail(
+                "View failed", result.text or f"tine exited {result.returncode}", record.path
+            )
+        return ActionResult(True, "HTML written", f"Saved: {target}", path=target)
+
     def _harness_from_options(self, options: HarnessOptions):
         if options.harness not in HARNESS_FACTORIES:
             choices = ", ".join(sorted(HARNESS_FACTORIES))
             raise ValueError(f"Unknown harness {options.harness!r}; choose one of {choices}")
         command = shlex.split(options.command_override) if options.command_override else None
-        if options.harness in {"generic", "pi"} and not command:
+        if options.harness in COMMAND_REQUIRED and not command:
             raise ValueError(f"Command override is required for {options.harness}")
+        if options.cwd and not Path(options.cwd).expanduser().is_dir():
+            raise ValueError(f"cwd is not a directory: {options.cwd}")
         factory = HARNESS_FACTORIES[options.harness]
-        return factory(
-            command=command,
-            extra_args=options.extra_args,
-            cwd=options.cwd,
-            login_env=options.login_env,
-            env_allowlist=options.env_allowlist,
-        )
+        kwargs: dict[str, Any] = {
+            "command": command,
+            "extra_args": options.extra_args,
+            "cwd": options.cwd,
+            "login_env": options.login_env,
+            "env_allowlist": options.env_allowlist,
+        }
+        if options.timeout_seconds is not None:
+            if not options.timeout_seconds > 0:
+                raise ValueError("timeout must be a positive number of seconds")
+            kwargs["timeout_seconds"] = options.timeout_seconds
+        return factory(**kwargs)
+
+    def _check_destination(self, options: HarnessOptions) -> None:
+        """Refuse before launching, not after: a harness run is not repeatable."""
+        if options.save_path and Path(options.save_path).expanduser().exists():
+            raise FileExistsError(f"{options.save_path} already exists; choose another path")
 
     def _save_failed_harness(
         self,
@@ -848,7 +1060,15 @@ class RunActionService:
         run = wrapped.run
         if run is None:
             return ActionResult(False, title, f"{type(exc).__name__}: {exc}")
-        path = self.repository.save(run, out or self.repository.path_for_run(run))
+        try:
+            path = self.repository.save(run, out or self.repository.path_for_run(run))
+        except Exception as save_exc:
+            return ActionResult(
+                False,
+                title,
+                f"{type(exc).__name__}: {exc}\n"
+                f"The partial run could not be saved either: {type(save_exc).__name__}: {save_exc}",
+            )
         return ActionResult(
             False,
             title,
@@ -857,3 +1077,100 @@ class RunActionService:
             path=path,
             refresh=True,
         )
+
+
+# -- opentine 0.25-0.34 features, driven through `tine` --------------------
+
+_OUTCOME_GLYPHS = {
+    "pass": "✓",
+    "fail": "✗",
+    "unavailable-offline": "·",
+    "not-applicable": "-",
+}
+
+
+def verify_report_text(report: dict[str, Any]) -> str:
+    """Render a ``tine-verify-report/1`` as rows the panel can show."""
+    lines = [
+        f"verdict: {report.get('verdict', '?')}" + ("  (strict)" if report.get("strict") else ""),
+        "",
+    ]
+    for check in report.get("checks") or []:
+        if not isinstance(check, dict):
+            continue
+        outcome = str(check.get("outcome", "?"))
+        if outcome == "not-applicable":
+            continue
+        glyph = _OUTCOME_GLYPHS.get(outcome, "?")
+        required = " (required)" if check.get("required") else ""
+        lines.append(f"{glyph} {check.get('name', '?')}: {outcome}{required}")
+        detail = check.get("detail")
+        if detail:
+            lines.append(f"    {detail}")
+        basis = check.get("trust_basis")
+        if basis and outcome == "pass":
+            lines.append(f"    trust: {basis}")
+    missing = report.get("unavailable_required") or []
+    if missing:
+        lines += ["", f"Required but not checkable offline: {', '.join(map(str, missing))}"]
+    stamps = report.get("timestamps") or []
+    if stamps:
+        lines += ["", "Timestamps:"]
+        for stamp in stamps:
+            if isinstance(stamp, dict):
+                lines.append(f"  {stamp.get('gen_time', '?')}  {stamp.get('tsa', '')}")
+    return "\n".join(lines)
+
+
+def fidelity_text(payload: dict[str, Any]) -> str:
+    fidelity = payload.get("fidelity") or {}
+    counts = fidelity.get("counts") or {}
+    lines = [
+        f"reproduced: {'yes' if payload.get('ok') else 'NO'}",
+        f"overall fidelity: {fidelity.get('overall', '?')}",
+        "  "
+        + "  ".join(
+            f"{name}={counts.get(name, 0)}"
+            for name in ("exact", "recomputed-match", "unavailable", "diverged")
+        ),
+    ]
+    drift = payload.get("drift") or {}
+    for name in ("structural", "only_source", "only_replay", "accounting"):
+        items = drift.get(name) or []
+        if items:
+            lines.append(f"{name.replace('_', ' ')} drift: {len(items)}")
+    weak = [
+        s
+        for s in fidelity.get("steps") or []
+        if isinstance(s, dict) and s.get("label") not in ("exact", None)
+    ]
+    if weak:
+        lines += ["", "Steps below exact:"]
+        lines += [f"  {short_id(str(s.get('id')))}  {s.get('label')}" for s in weak[:40]]
+    return "\n".join(lines)
+
+
+def rewind_text(payload: dict[str, Any]) -> str:
+    lines = [
+        f"root: {payload.get('root')}",
+        f"to step {payload.get('step_index')} "
+        f"{short_id(payload.get('step') or '') or '(before run)'}",
+        "applied" if payload.get("applied") else "dry run — nothing written",
+        "",
+    ]
+    for status in ("restore", "unchanged", "conflict", "unrecoverable", "refused"):
+        rows = payload.get(status) or []
+        if not rows:
+            continue
+        lines.append(f"{status} ({len(rows)}):")
+        for row in rows[:60]:
+            mode = row.get("mode")
+            reason = row.get("reason")
+            lines.append(
+                f"  {row.get('path')}"
+                + (f"  [{mode}]" if mode else "")
+                + (f"  {reason}" if reason else "")
+            )
+    if len(lines) == 4:
+        lines.append("No file edits recorded by this run.")
+    return "\n".join(lines)

@@ -48,6 +48,46 @@ BILLING_STATES: dict[str, tuple[str, str]] = {
 }
 
 
+#: Characters that can reorder or hide text on a terminal (bidi overrides and
+#: isolates, zero-width joiners, the BOM). Used only when opentine's own table is
+#: unavailable.
+_HIDDEN_FALLBACK = frozenset(
+    [
+        0x061C,
+        0x200B,
+        0x200C,
+        0x200D,
+        0x200E,
+        0x200F,
+        0x2060,
+        0xFEFF,
+        *range(0x202A, 0x202F),
+        *range(0x2066, 0x206A),
+    ]
+)
+
+try:  # the same predicate `tine` uses before printing untrusted text
+    from opentine._cli_text import displayable as _displayable
+except Exception:  # pragma: no cover - defensive
+
+    def _displayable(character: str) -> bool:
+        codepoint = ord(character)
+        return codepoint >= 32 and not 127 <= codepoint <= 159 and codepoint not in _HIDDEN_FALLBACK
+
+
+def plain_text(value: Any) -> str:
+    """``value`` as text with terminal control bytes and bidi tricks removed.
+
+    Run content is written by whoever produced the artifact. Textual renders
+    through its own compositor, but an ESC/OSC sequence or a right-to-left override
+    in a step's output can still corrupt the screen, smuggle a hyperlink, or make
+    one string read as another — so it is dropped, the way ``tine`` drops it.
+    Newlines and tabs are kept: they are layout, not control.
+    """
+    raw = str(value).encode("utf-8", "replace").decode("utf-8")
+    return "".join(ch for ch in raw if ch in "\n\t" or _displayable(ch))
+
+
 def escape_markup(text: Any) -> str:
     """Make arbitrary text safe to interpolate into Textual console markup.
 
@@ -60,8 +100,11 @@ def escape_markup(text: Any) -> str:
     Escaping *every* opening bracket is both sufficient and lossless: Textual reads
     ``\\[`` as a literal ``[`` and leaves every other character — backslashes
     included — alone, so the text renders exactly as recorded.
+
+    Control characters are removed first (see :func:`plain_text`): every caller
+    is interpolating text somebody else wrote.
     """
-    return str(text).replace("[", r"\[")
+    return plain_text(text).replace("[", r"\[")
 
 
 def short_ref(value: str | None, width: int = 12) -> str:

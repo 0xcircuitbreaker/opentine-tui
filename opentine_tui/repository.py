@@ -19,6 +19,33 @@ except Exception:  # pragma: no cover - defensive
     FORMAT_VERSION = 2
     SUPPORTED_VERSIONS = (1, 2)
 
+try:  # 0.26: format v4 is the default writer; v1/v2 files stay readable forever
+    from opentine._format_v4 import ARTIFACT_V4_VERSION, is_v4_artifact, writer_format
+except Exception:  # pragma: no cover - opentine < 0.26
+    ARTIFACT_V4_VERSION = 4
+
+    def is_v4_artifact(data: Any) -> bool:
+        return False
+
+    def writer_format() -> int:
+        return FORMAT_VERSION
+
+
+try:  # bounded, decompressing (TINEZ1), parser-differential-refusing reads
+    from opentine._artifact_io import read_artifact_bytes, read_artifact_json
+except Exception:  # pragma: no cover - defensive
+    read_artifact_bytes = read_artifact_json = None
+
+try:
+    from opentine._codec import is_wrapped as _is_compressed
+    from opentine._codec_io import write_artifact
+except Exception:  # pragma: no cover - defensive
+    write_artifact = None
+
+    def _is_compressed(data: bytes) -> bool:
+        return False
+
+
 try:
     from opentine.migrations import LEGACY_VERSION, MigrationError, detect_version, is_legacy_linear
 except Exception:  # pragma: no cover - defensive
@@ -47,6 +74,22 @@ except Exception:  # pragma: no cover - defensive
     atomic_write_text = None
 
 DEFAULT_RUNS_DIR = ".tine_runs"
+
+#: Every on-disk version this dashboard reads: v1/v2 files and the v4 bundle.
+READABLE_VERSIONS: tuple[int, ...] = (*SUPPORTED_VERSIONS, ARTIFACT_V4_VERSION)
+#: The newest format opentine knows; anything above it was written by a newer tool.
+NEWEST_VERSION = max(READABLE_VERSIONS)
+#: Refuse to read anything bigger than opentine itself would load.
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+
+
+def current_format() -> int:
+    """The format a save writes right now (4 unless ``OPENTINE_FORMAT`` pins 2)."""
+    try:
+        return int(writer_format())
+    except Exception:  # pragma: no cover - a malformed OPENTINE_FORMAT
+        return NEWEST_VERSION
+
 
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -92,10 +135,21 @@ def verify_integrity(path: str | Path) -> Any:
     )
 
 
-def _read_raw(path: Path) -> dict[str, Any] | None:
-    """Parse the raw .tine JSON (pre-migration, on-disk view), or None if unreadable."""
+def read_raw(path: Path) -> dict[str, Any] | None:
+    """Parse the raw .tine JSON (pre-migration, on-disk view), or None if unreadable.
+
+    Goes through opentine's own bounded reader: it unwraps TINEZ1 compression
+    (the default since 0.11), refuses files over 256 MiB, duplicate keys, NaN and
+    container bombs. A plain ``read_text`` here both failed on every compressed
+    artifact and let a hostile file in the runs directory exhaust memory on poll.
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        if read_artifact_json is not None:
+            data = read_artifact_json(path)
+        else:  # pragma: no cover - defensive
+            if path.stat().st_size > MAX_ARTIFACT_BYTES:
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -110,6 +164,11 @@ def _detect_on_disk(raw: dict[str, Any] | None) -> tuple[int | None, str]:
     """
     if raw is None:
         return None, "unreadable"
+    if is_v4_artifact(raw):
+        return ARTIFACT_V4_VERSION, f"v{ARTIFACT_V4_VERSION}"
+    declared = raw.get("format_version")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > NEWEST_VERSION:
+        return declared, "unsupported"
     if detect_version is None:  # pragma: no cover - defensive
         version = raw.get("format_version")
         if isinstance(version, int) and not isinstance(version, bool):
@@ -123,7 +182,7 @@ def _detect_on_disk(raw: dict[str, Any] | None) -> tuple[int | None, str]:
         return None, "unsupported"
     if version == LEGACY_VERSION:
         return version, "legacy 0.1.0"
-    if version in SUPPORTED_VERSIONS:
+    if version in READABLE_VERSIONS:
         return version, f"v{version}"
     return version, "unsupported"
 
@@ -178,14 +237,29 @@ class RunRecord:
 
     @property
     def needs_migration(self) -> bool:
-        """True for readable legacy(0)/v1 files that a re-save would upgrade."""
+        """True when any re-save (budget, sign, migrate) would change the format.
+
+        Since 0.26 every save writes v4, so that is any readable v1/v2/legacy
+        file — unless ``OPENTINE_FORMAT=2`` pins the deprecated writer.
+        """
+        if not self.can_upgrade or self.on_disk_version is None:
+            return False
+        return self.on_disk_version < current_format()
+
+    @property
+    def is_v4(self) -> bool:
+        return self.on_disk_version == ARTIFACT_V4_VERSION
+
+    @property
+    def can_upgrade(self) -> bool:
+        """A readable v1/v2/legacy file ``tine migrate`` would write as v4."""
         if self.load_error is not None or self.run is None:
             return False
-        return self.on_disk_version in (LEGACY_VERSION, 1)
+        return self.on_disk_version is not None and self.on_disk_version < ARTIFACT_V4_VERSION
 
     @property
     def is_future(self) -> bool:
-        return self.on_disk_version is not None and self.on_disk_version > FORMAT_VERSION
+        return self.on_disk_version is not None and self.on_disk_version > NEWEST_VERSION
 
     @property
     def is_draft(self) -> bool:
@@ -202,7 +276,7 @@ class RunRecord:
         # A legacy 0.1.0 file has no digest verifiable under current rules, so a
         # failed integrity check there is EXPECTED, not corruption.
         if self.integrity is not None and not self.integrity.ok:
-            return self.on_disk_version in SUPPORTED_VERSIONS
+            return self.on_disk_version in READABLE_VERSIONS
         return False
 
     @property
@@ -292,7 +366,7 @@ class RunRepository:
         except OSError:
             mtime = 0.0
 
-        raw = _read_raw(run_path)
+        raw = read_raw(run_path)
         on_disk_version, version_label = _detect_on_disk(raw)
         integrity = verify_integrity(run_path)
         signature = _signature_status(raw)
@@ -388,34 +462,68 @@ class RunRepository:
         out.parent.mkdir(parents=True, exist_ok=True)
         return run.save(out)
 
-    def write_tags(self, path: str | Path, tags: list[str]) -> Path:
-        """Persist tags by editing ``metadata.tags`` in the raw JSON.
+    def write_tags(self, path: str | Path, tags: list[str]) -> tuple[Path, bool]:
+        """Persist tags; returns ``(path, signature_kept)``.
 
-        Tags live outside both the integrity digest and the signature's signed
-        view, so this preserves an existing digest **and** signature and never
-        triggers a v1->v2 upgrade — unlike re-saving through ``Run.save``, which
-        recomputes the digest and drops the signature block. Mirrors the
-        canonical re-tag path exercised by opentine's own signing tests.
+        For a v1/v2 file tags live in ``metadata.tags``, outside both the
+        integrity digest and the signature's signed view, so editing the raw JSON
+        preserves an existing digest **and** signature and never triggers a format
+        upgrade — unlike ``Run.save``, which recomputes the digest, drops the
+        signature and (since 0.26) rewrites the file as v4. A compressed file is
+        written back compressed.
+
+        A v4 artifact keeps tags in its annotation chain, and ``tine-sig/3`` signs
+        the chain's head, so no tag edit can keep a v4 signature. That case goes
+        through ``Run.save`` exactly as ``tine tag`` does, and reports the
+        signature as dropped.
         """
         out = Path(path)
-        raw = _read_raw(out)
+        raw = read_raw(out)
         if raw is None:
-            raise ValueError("cannot edit tags: file is not readable JSON")
+            raise ValueError("cannot edit tags: file is not a readable .tine artifact")
+        if is_v4_artifact(raw):
+            run = Run.load(out)
+            run.tags = list(tags)
+            signed = bool(raw.get("signatures"))
+            run.save(out)
+            return out, not signed
         meta = raw.setdefault("metadata", {})
         if not isinstance(meta, dict):  # pragma: no cover - defensive
             raise ValueError("cannot edit tags: metadata is not an object")
+        # `tine-sig/1` signs a frozen allowlist of metadata keys that excludes
+        # tags. `tine-sig/2` (0.7.1+) signs every metadata key but `integrity`,
+        # tags included — so editing a tag there leaves a signature that no longer
+        # verifies. Removing that block is the honest outcome (it is what `tine tag`
+        # does); keeping it would show a signed artifact that fails on the next
+        # verify. The integrity digest does not cover tags either way.
+        integrity_block = meta.get("integrity")
+        signature_kept = True
+        if isinstance(integrity_block, dict) and isinstance(integrity_block.get("signature"), dict):
+            scheme = str(integrity_block["signature"].get("scheme") or "")
+            if scheme not in ("", "tine-sig/1"):  # a missing scheme is v1
+                integrity_block.pop("signature")
+                signature_kept = False
         if tags:
             meta["tags"] = list(tags)
         else:
             meta.pop("tags", None)
         text = json.dumps(raw, indent=2, sort_keys=True)
-        if atomic_write_text is not None:
+        compressed = False
+        if read_artifact_bytes is not None:
+            try:
+                with out.open("rb") as handle:
+                    compressed = _is_compressed(handle.read(16))
+            except OSError:
+                compressed = False
+        if compressed and write_artifact is not None:
+            write_artifact(out, text)
+        elif atomic_write_text is not None:
             atomic_write_text(out, text)
         else:  # pragma: no cover - defensive fallback
             tmp = out.with_name(out.name + ".tmp")
             tmp.write_text(text, encoding="utf-8")
             tmp.replace(out)
-        return out
+        return out, signature_kept
 
 
 def filter_records(records: list[RunRecord], query: str) -> tuple[list[RunRecord], str | None]:

@@ -159,24 +159,55 @@ def test_filter_bad_query_reports_error_and_keeps_records(tmp_path: Path):
 # --- migration ---------------------------------------------------------------
 
 
-def test_migrate_upgrades_v1_in_place(tmp_path: Path):
+def test_migrate_writes_a_v4_copy_and_keeps_the_original(tmp_path: Path):
+    """0.26 `tine migrate` semantics: NAME.v4.tine beside an untouched original."""
+    repo = RunRepository(tmp_path)
+    service = RunActionService(repo)
+    dest = _write_v1(tmp_path / "v1.tine")
+    before = dest.read_bytes()
+
+    result = service.migrate(repo.inspect_path(dest))
+
+    assert result.ok, result.message
+    assert dest.read_bytes() == before
+    upgraded = repo.inspect_path(tmp_path / "v1.v4.tine")
+    assert upgraded.on_disk_version == 4
+    assert upgraded.integrity.ok
+    assert len(upgraded.run.steps) == len(repo.inspect_path(dest).run.steps)
+
+
+def test_migrate_in_place_keeps_a_backup(tmp_path: Path):
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
     dest = _write_v1(tmp_path / "v1.tine")
 
+    result = service.migrate(repo.inspect_path(dest), in_place=True)
+
+    assert result.ok, result.message
+    assert repo.inspect_path(dest).on_disk_version == 4
+    assert (tmp_path / "v1.tine.v2.bak").is_file()
+
+
+def test_migrate_refuses_to_clobber_an_existing_copy(tmp_path: Path):
+    repo = RunRepository(tmp_path)
+    service = RunActionService(repo)
+    dest = _write_v1(tmp_path / "v1.tine")
+    (tmp_path / "v1.v4.tine").write_text("keep me", encoding="utf-8")
+
     result = service.migrate(repo.inspect_path(dest))
 
-    assert result.ok
-    assert repo.inspect_path(dest).on_disk_version == 2
+    assert not result.ok
+    assert (tmp_path / "v1.v4.tine").read_text(encoding="utf-8") == "keep me"
 
 
-def test_migrate_skips_current(tmp_path: Path):
+def test_migrate_skips_v4(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENTINE_FORMAT")
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
     path = repo.save(_completed_run())
     result = service.migrate(repo.inspect_path(path))
     assert not result.ok
-    assert "current" in result.message.lower()
+    assert "already format v4" in result.message.lower()
 
 
 # --- tags --------------------------------------------------------------------
@@ -408,8 +439,12 @@ async def test_migrate_keypress_round_trip(tmp_path: Path):
         await pilot.press("m")
         assert await _settle(app, pilot, MigrateModal)
         await pilot.click("#ok")
-        await pilot.pause()
-        assert app.repository.inspect_path(runs_dir / "v1.tine").on_disk_version == 2
+        for _ in range(100):  # the CLI child takes a moment
+            await pilot.pause(0.1)
+            if (runs_dir / "v1.v4.tine").exists():
+                break
+        assert app.repository.inspect_path(runs_dir / "v1.v4.tine").on_disk_version == 4
+        assert app.repository.inspect_path(runs_dir / "v1.tine").on_disk_version == 1
 
 
 @pytest.mark.asyncio
@@ -429,9 +464,14 @@ async def test_sign_keypress_opens_modal(tmp_path: Path):
 # --- regression coverage for the adversarial review findings -----------------
 
 
-def test_set_tags_preserves_signature_and_integrity(tmp_path: Path):
-    """Tagging a signed run must NOT drop its signature (tags are outside both
-    the digest and the signed view)."""
+def test_set_tags_on_a_sig2_artifact_removes_the_signature_honestly(tmp_path: Path):
+    """`tine-sig/2` signs every metadata key but `integrity` — tags included.
+
+    Editing a tag therefore cannot keep that signature. Before 0.34 the dashboard
+    claimed it did, and left a block behind that failed the next verify; it now
+    removes the signature (as `tine tag` does), says so, and keeps the digest
+    and the on-disk format.
+    """
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
     path = tmp_path / "signed.tine"
@@ -441,8 +481,10 @@ def test_set_tags_preserves_signature_and_integrity(tmp_path: Path):
     result = service.set_tags(repo.inspect_path(path), ["important"], [])
 
     assert result.ok
-    assert Run.verify_signature(path, hmac_key=HMAC_KEY).ok  # still verifies
+    assert "removed" in result.message
+    assert Run.verify_signature(path).state == "unsigned"
     assert Run.verify_integrity(path).ok
+    assert repo.inspect_path(path).on_disk_version == 2
     assert "important" in Run.load(path).tags
 
 
@@ -528,3 +570,7 @@ async def test_search_cancel_keeps_active_filter(tmp_path: Path):
         await pilot.pause()
         assert app._query == "tag:bug"
         assert app.query_one(RunList).row_count == 1
+
+
+# These modules pin v2 file semantics (raw-JSON tampering, v2 signatures).
+pytestmark = pytest.mark.usefixtures("legacy_v2")

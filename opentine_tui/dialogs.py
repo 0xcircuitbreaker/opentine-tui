@@ -8,7 +8,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select, Static, Switch
+from textual.widgets import Button, Input, Label, Select, Static, Switch, TextArea
 
 from opentine_tui.actions import (
     HARNESS_FACTORIES,
@@ -17,6 +17,7 @@ from opentine_tui.actions import (
     SignOptions,
     VerifyKeyOptions,
 )
+from opentine_tui.formatting import escape_markup
 from opentine_tui.interop import (
     DEFAULT_REF,
     IMPORT_FORMATS,
@@ -75,8 +76,8 @@ class ConfirmationModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
-            yield Label(f"[bold #FF6900]{self.title_text}[/]")
-            yield Static(self.message)
+            yield Label(f"[bold #FF6900]{escape_markup(self.title_text)}[/]")
+            yield Static(escape_markup(self.message))
             with Horizontal(id="confirm-actions"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Confirm", id="confirm", variant="error")
@@ -116,7 +117,7 @@ class TextInputModal(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="input-dialog"):
-            yield Label(f"[bold #FF6900]{self.title_text}[/]")
+            yield Label(f"[bold #FF6900]{escape_markup(self.title_text)}[/]")
             yield Input(value=self.value, placeholder=self.placeholder, id="value")
             with Horizontal(id="input-actions"):
                 yield Button("Cancel", id="cancel")
@@ -178,7 +179,7 @@ class HarnessOptionsModal(ModalScreen[HarnessOptions | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="harness-dialog"):
-            yield Label(f"[bold #FF6900]{self.title_text}[/]")
+            yield Label(f"[bold #FF6900]{escape_markup(self.title_text)}[/]")
             # The harness list comes from the installed opentine, so a preset added
             # there (0.3.0 added grok and gemini) shows up without editing the TUI.
             choices = sorted(HARNESS_FACTORIES) or ["generic"]
@@ -193,6 +194,7 @@ class HarnessOptionsModal(ModalScreen[HarnessOptions | None]):
             yield Input(placeholder='Command override, e.g. "codex exec"', id="command")
             yield Input(placeholder="Extra args, shell-quoted", id="extra")
             yield Input(placeholder="Env allowlist, comma separated", id="env")
+            yield Input(placeholder="Timeout seconds (blank: opentine default)", id="timeout")
             with Horizontal(classes="toggle"):
                 yield Switch(value=False, id="login")
                 yield Label("Pass the login environment through to the harness")
@@ -226,7 +228,17 @@ class HarnessOptionsModal(ModalScreen[HarnessOptions | None]):
         env_allowlist = tuple(
             item.strip() for item in self._input_value("#env").split(",") if item.strip()
         )
+        timeout_text = self._input_value("#timeout")
+        try:
+            timeout = float(timeout_text) if timeout_text else None
+        except ValueError:
+            self.query_one("#harness-error", Static).update("Timeout must be a number of seconds.")
+            return None
+        if timeout is not None and not timeout > 0:
+            self.query_one("#harness-error", Static).update("Timeout must be positive.")
+            return None
         data: dict[str, Any] = {
+            "timeout_seconds": timeout,
             "harness": str(self.query_one("#harness", Select).value or "codex"),
             "prompt": self._input_value("#prompt"),
             "cwd": self._input_value("#cwd") or None,
@@ -305,7 +317,7 @@ class TagEditorModal(ModalScreen[dict | None]):
         current = ", ".join(self.current_tags) or "(none)"
         with Vertical(id="dialog"):
             yield Label("[bold #FF6900]Edit tags[/]")
-            yield Static(f"Current: {current}")
+            yield Static(f"Current: {escape_markup(current)}")
             yield Static("[dim]Tags are lower-cased, de-duped, and live outside the digest.[/]")
             yield Input(placeholder="Add (comma separated)", id="add")
             yield Input(placeholder="Remove (comma separated)", id="remove")
@@ -479,6 +491,8 @@ class VerifyKeyModal(ModalScreen[VerifyKeyOptions | None]):
 
 
 class MigrateModal(ModalScreen[dict | None]):
+    """``tine migrate --to v4``: writes NAME.v4.tine beside the original."""
+
     DEFAULT_CSS = _DIALOG_CSS % {"name": "MigrateModal"}
 
     def __init__(
@@ -497,16 +511,25 @@ class MigrateModal(ModalScreen[dict | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("[bold #FF6900]Migrate to v2[/]")
-            yield Static(f"{self.version_label} -> v2 (one-way; 0.1.x can no longer read it).")
+            yield Label("[bold #FF6900]Migrate to format v4[/]")
+            yield Static(
+                f"{escape_markup(self.version_label)} -> v4. The original is left untouched; the "
+                "upgrade is written as NAME.v4.tine unless you name a path. "
+                "Readers need opentine >= 0.26."
+            )
             if self.is_legacy:
                 yield Static("[yellow]Legacy import recomputes step ids (best-effort).[/]")
             if self.has_signature:
-                yield Static("[yellow]Signature will be dropped — re-sign after migrating.[/]")
-            yield Input(placeholder="save as (blank: rewrite in place)", id="save_path")
+                yield Static(
+                    "[yellow]The source signature is recorded as a claim; "
+                    "re-sign the v4 file afterwards.[/]"
+                )
+            yield Input(placeholder="save as (blank: NAME.v4.tine)", id="save_path")
+            yield from _toggle("In place (keeps NAME.tine.v2.bak)", "in_place")
             if not self.integrity_ok and not self.is_legacy:
                 yield Static("[red]Integrity check failed.[/] Enable Force to migrate.")
             yield from _toggle("Force — migrate despite a failed check / replace a file", "force")
+            yield Static("", id="dialog-error")
             with Horizontal(id="dialog-actions"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Migrate", id="ok", variant="error")
@@ -515,15 +538,76 @@ class MigrateModal(ModalScreen[dict | None]):
         if event.button.id != "ok":
             self.dismiss(None)
             return
+        save_path = self.query_one("#save_path", Input).value.strip() or None
+        in_place = self.query_one("#in_place", Switch).value
+        if save_path and in_place:
+            self.query_one("#dialog-error", Static).update("Choose a save path or in place.")
+            return
         self.dismiss(
             {
                 "force": self.query_one("#force", Switch).value,
-                "save_path": self.query_one("#save_path", Input).value.strip() or None,
+                "save_path": save_path,
+                "in_place": in_place,
             }
         )
 
     def key_escape(self) -> None:
         self.dismiss(None)
+
+
+class ForkEditModal(_Dialog):
+    """``tine fork --set/--unset``: fork with the fork-point step edited."""
+
+    DEFAULT_CSS = (
+        _DIALOG_CSS % {"name": "ForkEditModal"}
+        + """
+    #edits { height: 8; margin-bottom: 1; }
+    """
+    )
+
+    def __init__(self, step_label: str) -> None:
+        super().__init__()
+        self.step_label = step_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("[bold #FF6900]Fork with an edited step[/]")
+            yield Static(f"Fork point: {escape_markup(self.step_label)}")
+            yield Static(
+                "[dim]One edit per line. PATH=VALUE sets (VALUE is JSON, else a string),\n"
+                "PATH[+]=VALUE appends, -PATH deletes. Paths: inputs.KEY..., model,\n"
+                "tool_info.KEY. The original run is never modified.[/]"
+            )
+            yield TextArea("", id="edits")
+            yield Input(placeholder="save as (optional)", id="save_path")
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Fork", id="ok", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ok":
+            self.dismiss(None)
+            return
+        sets: list[str] = []
+        unsets: list[str] = []
+        for line in self.query_one("#edits", TextArea).text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("-"):
+                unsets.append(line[1:].strip())
+            elif "=" in line:
+                sets.append(line)
+            else:
+                self._error(f"Not an edit: {line[:60]!r} (PATH=VALUE or -PATH)")
+                return
+        if not sets and not unsets:
+            self._error("Give at least one edit.")
+            return
+        self.dismiss(
+            {"sets": sets, "unsets": unsets, "save_path": self._value("#save_path") or None}
+        )
 
 
 class PromoteModal(_Dialog):
@@ -539,7 +623,7 @@ class PromoteModal(_Dialog):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label("[bold #FF6900]Promote run[/]")
-            yield Static(f"Promoting {self.run_label}.")
+            yield Static(f"Promoting {escape_markup(self.run_label)}.")
             yield Static("[dim]Ref names are lower-case and may use a-z 0-9 . _ - / only.[/]")
             yield Input(placeholder="promotion name, e.g. production", id="name")
             yield from _toggle("Move an existing promotion (compare-and-swap)", "overwrite")
