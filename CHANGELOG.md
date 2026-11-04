@@ -5,6 +5,53 @@ All notable changes to opentine-tui are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0] - 2026-11-04
+
+Tracks opentine 0.34.0. Requires `opentine>=0.34,<0.35`. The version number now
+follows the opentine release it tracks.
+
+### Added
+- **Format v4 support.** v4 bundles (`tine-artifact/4`) and compressed
+  (`TINEZ1`) artifacts — what opentine writes by default since 0.26 and 0.11 —
+  are listed, verified and rendered instead of being shown as corrupt.
+- **Migrate to v4** (`m`) runs `tine migrate --to v4`: writes `NAME.v4.tine`
+  beside the untouched original (or in place with a `.v2.bak`) and records the
+  same `upgraded_from` provenance the CLI does.
+- **Offline verify report** (`V`), **replay fidelity** (`y`), **fork with an
+  edited step** (`F`, `--set`/`--unset`/append), **rewind** (`w`, dry run first,
+  conflicts block the apply) and the **HTML viewer** (`H`).
+- Details panel: v4 `upgraded_from` provenance, the fork edit log, stored file
+  originals, `metadata.warnings`, and attached RFC 3161 timestamps.
+- Every harness opentine ships (25) is offered, from opentine's own registry,
+  with an optional timeout; every `tine import` format (18, including session
+  logs and `auto`) is offered.
+- The Files list flags v2 files (`2`) that `m` can upgrade.
+
+### Fixed
+- **Fork/replay-with-harness sent the wrong context.** The harness was given the
+  steps *after* the fork point (the history the user chose to discard) instead
+  of the steps leading to it. It now uses the CLI's own context builder.
+- **Tag edits silently broke `tine-sig/2` signatures.** That scheme signs every
+  metadata key, tags included, so the dashboard's "signature preserved" left a
+  block that failed the next verify. The signature is now removed and the user
+  told, as `tine tag` does; `tine-sig/1` signatures are still preserved.
+- An exception escaping any action no longer exits the dashboard; it is shown as
+  a failed result.
+- Messages no longer show literal `[dim]`/`[yellow]` markup.
+
+### Security
+- Artifact reads go through opentine's bounded reader (256 MiB cap, duplicate
+  keys, NaN and nesting bombs refused). The old `read_text` could be made to
+  exhaust memory by any file dropped into the runs directory, on every poll.
+- Terminal control bytes, OSC hyperlinks and bidi overrides in run content are
+  stripped before display, matching what `tine` prints.
+- Dialog labels built from artifact or user text (tags, run labels, confirmation
+  messages) are markup-escaped.
+- CLI calls use an argument list (no shell), absolute paths (a file named
+  `--force.tine` is not a flag), a timeout, no stdin and bounded output.
+- Harness launches refuse an existing save path and a non-directory `cwd`
+  before starting, and a failed save of a partial run is reported, not raised.
+
 ## [0.5.0] - 2026-08-01
 
 Tracks opentine 0.5.0, the Ecosystem Release. Requires `opentine>=0.5,<0.6`.

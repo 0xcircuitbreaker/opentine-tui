@@ -12,12 +12,12 @@ pip install opentine-tui
 ```
 
 That pulls in [`opentine`](https://github.com/0xcircuitbreaker/opentine)
-`>=0.5,<0.6`. Portable `.tine` files are **format v2** (migration, tags + search,
-cost + budget, autosave/drafts, signing, field-level diff); 0.3 added the
-git-shaped **v3 repository** (content-addressed objects, refs, fsck, semantic
-diff, attestations), 0.4 made a fork id identify the **fork act**, and 0.5 added
-**OpenTelemetry GenAI export** and the **trace importers** — the dashboard
-manages all of it.
+`>=0.34,<0.35`. opentine now writes **format v4** artifacts (one canonical
+JCS bundle of v3 envelopes, compressed on disk, signed with `tine-sig/3`) and
+still reads every v1/v2 file and v3 repository; the dashboard reads all of
+them, migrates v1/v2 to v4, and drives the 0.22–0.34 additions — offline
+verify reports, replay fidelity labels, forks with edited steps, rewind, the
+HTML viewer and the session-log importers.
 
 Ed25519 signing and keygen work out of the box: `opentine` 0.4 depends on
 `cryptography` directly. The `crypto` extra is kept as a no-op so
@@ -86,8 +86,13 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `1` `2` `3` | Focus runs / steps / details panel |
 | `↑` `↓` | Browse runs — the step and detail panels follow the highlight |
 | `v` | Files: verify integrity + signature. Repository: deep `fsck` |
-| `t` | Edit tags on the selected run (kept outside the digest) |
-| `m` | Migrate a v1/legacy `.tine` to v2 (one-way; in place or to a new path) |
+| `t` | Edit tags on the selected run (outside the digest; a `tine-sig/2`/`/3` signature covers tags and is removed, with a notice) |
+| `m` | Migrate a v1/v2/legacy `.tine` to format v4 (`NAME.v4.tine` beside the original, or in place with a `.v2.bak`) |
+| `V` | Offline verify report (`tine verify --offline`): digest, signature, provenance, timestamps, actions |
+| `y` | Replay fidelity (`tine replay --verify`): `exact` / `recomputed-match` / `unavailable` / `diverged` per step |
+| `F` | Fork from the selected step with its inputs / model / tool args edited (`tine fork --set/--unset`) |
+| `w` | Rewind the files the run edited back to the selected step (dry run first, then confirm) |
+| `H` | Write a self-contained HTML page for the run (`tine view`) |
 | `b` | Set a budget (`max_cost`/`max_usage`/`max_steps`/`max_duration`, breach mode, strict cost) |
 | `s` | Sign the selected run (HMAC-SHA256 or Ed25519, via env var / key file) |
 | `k` | Generate an Ed25519 keypair (refuses to replace an existing key) |
@@ -104,10 +109,28 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `l` | Walk a ref's event ancestry |
 | `o` | Inspect a verified v3 object by id |
 | `E` | Export the selected run as an OpenTelemetry GenAI (OTLP/JSON) document |
-| `I` | Import an OTel / JSONL / framework trace as a run |
+| `I` | Import a trace or agent session log as a run (all 18 `tine import` formats, incl. `auto`) |
 
 Write operations and external harness launches require an explicit confirmation
 modal before they run.
+
+## What's new for opentine 0.34
+
+- **Format v4 everywhere.** Compressed (`TINEZ1`) and v4 artifacts are read
+  through opentine's bounded reader instead of being listed as corrupt; the
+  Files list flags v1 (`1`), v2 (`2`) and legacy (`L`) files that `m` can
+  upgrade, and the details panel shows a v4 run's `upgraded_from` provenance,
+  fork edit log, stored file originals, `metadata.warnings` and attached RFC 3161
+  timestamps.
+- **New actions** — `V` offline verify report, `y` replay fidelity, `F` fork with
+  an edited step, `w` rewind, `H` HTML view. These run the real `tine` command in
+  a child process (argument list, no shell, absolute paths, timeout, sanitized
+  output), so the dashboard's behaviour and refusals match the CLI exactly.
+- **Every harness opentine ships** (25 in 0.34) is offered, read from opentine's
+  own registry, with an optional timeout.
+- **Every import format**: Claude Code transcripts, Codex / Gemini / Qwen /
+  OpenCode sessions, Hermes trajectories, ATIF, OTel logs, `entire` and `auto`
+  detection, on top of the in-process OTel/JSONL/framework readers.
 
 ## What's new for opentine 0.5.0
 
@@ -189,7 +212,7 @@ The dashboard now manages the full `.tine` **format v2** surface:
 ## Development
 
 ```bash
-pip install -e ".[dev]"   # resolves opentine>=0.5,<0.6 from PyPI
+pip install -e ".[dev]"   # resolves opentine>=0.34,<0.35 from PyPI
 
 ruff check .
 ruff format --check .
@@ -201,8 +224,8 @@ about what users get. To test against a source checkout instead — a worktree a
 release tag, say — point `OPENTINE_SRC` at it:
 
 ```bash
-git -C ../opentine worktree add /tmp/opentine-v050 v0.5.0
-OPENTINE_SRC=/tmp/opentine-v050 pytest
+git -C ../opentine worktree add /tmp/opentine-v0340 v0.34.0
+OPENTINE_SRC=/tmp/opentine-v0340 pytest
 ```
 
 CI runs lint, format, the test suite, a packaging build, and a `twine` metadata
