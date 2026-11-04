@@ -11,8 +11,10 @@ Safety rules every call here follows:
 
 * argv is a list handed to ``subprocess.run`` — there is no shell, so nothing a
   user types or an artifact contains is ever interpreted as shell syntax;
-* every path is made absolute first, so a file named ``--force`` cannot be read
-  as a flag;
+* every path is made absolute first, and values that come from an artifact or
+  from user input are passed as ``--opt=value``, so neither can become a flag;
+* the child runs with ``-P``, so a package planted in the working directory
+  cannot shadow opentine;
 * the child gets a timeout, no stdin, ``NO_COLOR`` and a dumb terminal, and its
   output is bounded and stripped of control bytes before anything displays it.
 """
@@ -111,7 +113,12 @@ def run_tine(
     Using ``sys.executable`` rather than whatever ``tine`` is first on PATH pins
     the child to the opentine this dashboard imported and checked.
     """
-    argv = [sys.executable, "-c", _LAUNCHER, *[str(arg) for arg in args]]
+    # -P (safe path, Python 3.11+): with plain `python -c` the working directory
+    # is first on sys.path, so an `opentine/` package planted wherever the
+    # dashboard was started would be imported and run in place of the real one.
+    # -P drops that entry but, unlike -I, keeps the user site and PYTHONPATH a
+    # `pip install --user` or a dev checkout relies on.
+    argv = [sys.executable, "-P", "-c", _LAUNCHER, *[str(arg) for arg in args]]
     environment = _environment()
     if env:
         environment.update(env)

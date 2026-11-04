@@ -42,6 +42,8 @@ class ImportOptions:
     source: str = ""
     ref: str = "heads/main"
     allow_unverified: bool = False
+    # Move `ref` even though it already names another run (v4 imports).
+    overwrite: bool = False
 
 
 def _fail(title: str, exc: BaseException) -> ActionResult:
@@ -210,9 +212,32 @@ class RepoActionService:
         reader re-derives every oid first, so a tampered file is refused there
         (there is no "allow unverified" for v4).
         """
-        argv = ["import", arg_path(source), "--repo", arg_path(self.repo.worktree), "--json"]
-        if options.ref:
-            argv += ["--ref", options.ref]
+        ref = (options.ref or "").strip()
+        if not ref:
+            # `tine import --repo` without --ref advances heads/main; a blank field
+            # in the dialog must not mean "move main" without saying so.
+            return ActionResult(False, "Import refused", "Give the ref this import should set.")
+        try:
+            current = self.repo.repo.read_ref(ref)
+        except ACTION_ERRORS:
+            current = None
+        if current is not None and not options.overwrite:
+            return ActionResult(
+                False,
+                "Import blocked",
+                (
+                    f"{ref} already points at {short_oid(current)}.\n"
+                    "Importing would move it to this run. Choose another ref, or "
+                    "re-run accepting the move."
+                ),
+            )
+        argv = [
+            "import",
+            arg_path(source),
+            f"--repo={arg_path(self.repo.worktree)}",
+            f"--ref={ref}",
+            "--json",
+        ]
         result = run_tine(argv)
         payload = result.json()
         if not result.ok or not isinstance(payload, dict):
@@ -271,8 +296,13 @@ class RepoActionService:
             # slice is deduplicated rather than created. Saying "new run" then would
             # claim work that did not happen, so note what was there beforehand.
             before = set(self.repo.all_oids())
-            new_id = self.repo.repo.fork(record.oid, event_oid, ref=ref or None)
+            new_id = self.repo.repo.fork(record.oid, event_oid)
             deduped = new_id in before
+            if ref:
+                # Compare-and-swap against the value the user saw (and, for an
+                # existing ref, approved moving): a ref created or moved since
+                # then makes this fail instead of being silently overwritten.
+                self.repo.repo.update_ref(ref, new_id, expected_old=existing, actor="dashboard")
         except ACTION_ERRORS as exc:
             return _fail("Fork failed", exc)
         headline = "Forked" if not deduped else "Fork already existed"

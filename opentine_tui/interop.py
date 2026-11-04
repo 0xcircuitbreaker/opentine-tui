@@ -54,6 +54,9 @@ except Exception:  # pragma: no cover - defensive
 #: ``tine import`` itself, so every reader opentine ships is reachable.
 IMPORT_FORMATS = (*NATIVE_FORMATS, *(f for f in _CLI_FORMATS if f not in NATIVE_FORMATS))
 DEFAULT_REF = "heads/main"
+#: In-process readers parse a whole trace in memory; the same cap opentine puts
+#: on an artifact keeps a stray multi-GB file from taking the dashboard down.
+MAX_TRACE_BYTES = 256 * 1024 * 1024
 
 #: Import and export both raise these for "this payload cannot be read/written".
 #: KernelError subclasses ValueError, so a repository refusal lands here too.
@@ -117,7 +120,18 @@ def read_events(source: str | Path, source_format: str) -> list[Any]:
     if source_format == "jsonl":
         # The JSONL importer does its own bounded, streaming read of a path.
         return jsonl_events(str(source))
-    text = Path(source).read_text(encoding="utf-8", errors="replace")
+    path = Path(source)
+    size = path.stat().st_size
+    if size > MAX_TRACE_BYTES:
+        raise ValueError(
+            f"{path.name} is {size // (1024 * 1024)} MiB; traces over "
+            f"{MAX_TRACE_BYTES // (1024 * 1024)} MiB are refused (read whole into memory)"
+        )
+    with path.open("rb") as handle:  # bounded even if the file grows meanwhile
+        data = handle.read(MAX_TRACE_BYTES + 1)
+    if len(data) > MAX_TRACE_BYTES:
+        raise ValueError(f"{path.name} grew past the trace size limit while being read")
+    text = data.decode("utf-8", errors="replace")
     if source_format == "otel-json":
         return otel_genai_events(json.loads(text))
     if source_format == "otel-spans":

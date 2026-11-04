@@ -468,8 +468,19 @@ class OpentineTUI(App):
             return
         self._apply_repo_records(self.v3.list_runs())
 
-    @work(exclusive=True, group="scan")
-    async def _poll(self) -> None:
+    def _poll(self) -> None:
+        """Timer tick: start a rescan unless one is still running.
+
+        The scan worker group used to be exclusive, so each tick *cancelled* the
+        scan in flight — on a directory that takes longer than the interval to
+        inspect (or during a manual refresh), no scan ever finished.
+        """
+        if any(worker.group == "scan" and not worker.is_finished for worker in self.workers):
+            return
+        self._scan()
+
+    @work(group="scan")
+    async def _scan(self) -> None:
         """Periodic rescan, off the event loop.
 
         Inspecting an artifact reads, integrity-checks, signature-checks and loads
@@ -498,6 +509,17 @@ class OpentineTUI(App):
             )
             if replacement:
                 self._selected_repo_record = replacement
+            else:
+                # The run left the repository (gc, a ref deleted). Acting on the
+                # stale record would target an object nobody can see any more.
+                self._selected_repo_record = None
+                self._repo_run = None
+                self._selected_step_id = None
+                if self.repo_mode:
+                    self.query_one(StepTree).clear_run("[dim]Run is gone[/]")
+                    self.query_one(StepDetail).set_message(
+                        "Run is gone", "That run object is no longer listed.", False
+                    )
 
     def _apply_records(self, records: list[RunRecord]) -> None:
         previous = self._selected_record
@@ -526,8 +548,12 @@ class OpentineTUI(App):
         self._selected_record = replacement
         if replacement.mtime != previous.mtime:
             # The file changed underneath us — a live harness appending steps, or
-            # another process. Repaint rather than freeze the DAG at selection time.
+            # another process. Repaint rather than freeze the DAG at selection time,
+            # but keep the step the user had open (when it still exists).
+            step_id = self._selected_step_id
             self.select_run(replacement.key)
+            if step_id and replacement.run is not None and replacement.run.get_step(step_id):
+                self.select_step(step_id)
 
     def _update_runs_title(self, error: str | None = None) -> None:
         title = "[bold #FF6900]Runs[/]"
@@ -763,22 +789,24 @@ class OpentineTUI(App):
         record = self._require_loaded()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         if not await self._confirm(
             "Fork run",
             "This will write a new .tine artifact from the selected step.",
         ):
             return
-        self._show_result(
-            await self._run_in_thread(self.actions.fork, record.run, self._selected_step_id)
-        )
+        self._show_result(await self._run_in_thread(self.actions.fork, record.run, step_id))
 
     async def _fork_repo_run(self) -> None:
         record = self._require_repo_record()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         # A repository step id IS the event id it was materialized from, so the
         # step highlighted in the tree is exactly the fork point opentine wants.
-        if not self._selected_step_id:
+        if not step_id:
             self._show_result(
                 ActionResult(False, "Fork failed", "Select the event to fork from first.")
             )
@@ -792,9 +820,7 @@ class OpentineTUI(App):
         )
         if ref is None:
             return
-        result = await self._run_in_thread(
-            self._repo_service().fork, record, self._selected_step_id, ref.strip()
-        )
+        result = await self._run_in_thread(self._repo_service().fork, record, step_id, ref.strip())
         if not result.ok and "already points at" in result.message:
             if not await self._confirm(
                 "Move an existing ref",
@@ -804,7 +830,7 @@ class OpentineTUI(App):
                 self._show_result(result)
                 return
             result = await self._run_in_thread(
-                self._repo_service().fork, record, self._selected_step_id, ref.strip(), True
+                self._repo_service().fork, record, step_id, ref.strip(), True
             )
         self._show_result(result)
 
@@ -813,14 +839,14 @@ class OpentineTUI(App):
         record = self._require_loaded()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         if not await self._confirm(
             "Cache replay",
             "This will write a new .tine artifact that reuses recorded steps.",
         ):
             return
-        self._show_result(
-            await self._run_in_thread(self.actions.cache_replay, record.run, self._selected_step_id)
-        )
+        self._show_result(await self._run_in_thread(self.actions.cache_replay, record.run, step_id))
 
     @work
     async def action_diff(self) -> None:
@@ -881,6 +907,8 @@ class OpentineTUI(App):
         record = self._require_loaded()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         options = await self._request_harness_options("Fork and run harness")
         if options is None:
             return
@@ -892,7 +920,7 @@ class OpentineTUI(App):
         result = await self._run_in_thread(
             self.actions.fork_harness,
             record.run,
-            self._selected_step_id,
+            step_id,
             options,
         )
         self._show_result(result)
@@ -902,6 +930,8 @@ class OpentineTUI(App):
         record = self._require_loaded()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         options = await self._request_harness_options("Replay with harness")
         if options is None:
             return
@@ -913,7 +943,7 @@ class OpentineTUI(App):
         result = await self._run_in_thread(
             self.actions.replay_harness,
             record.run,
-            self._selected_step_id,
+            step_id,
             options,
         )
         self._show_result(result)
@@ -942,6 +972,15 @@ class OpentineTUI(App):
         ):
             return
         result = await self._run_in_thread(self._repo_service().import_v2, options)
+        if not result.ok and "already points at" in result.message:
+            if not await self._confirm(
+                "Move an existing ref",
+                f"{options.ref} already names a run. Importing moves it to this file's run.",
+            ):
+                self._show_result(result)
+                return
+            options.overwrite = True
+            result = await self._run_in_thread(self._repo_service().import_v2, options)
         self._show_result(result)
 
     @work
@@ -1177,13 +1216,14 @@ class OpentineTUI(App):
         record = self._require_loaded()
         if record is None:
             return
+        # Captured now: a poll may repaint the tree while a modal is open.
+        step_id = self._selected_step_id
         root = await self.push_screen_wait(
             TextInputModal("Rewind files under", "working tree root", value=str(Path.cwd()))
         )
         if not root:
             return
-        step = self._selected_step_id
-        plan = await self._run_in_thread(self.actions.rewind, record, step, root, False)
+        plan = await self._run_in_thread(self.actions.rewind, record, step_id, root, False)
         self._show_result(plan)
         if not plan.ok or "restore (" not in plan.message:
             return
@@ -1193,7 +1233,9 @@ class OpentineTUI(App):
             "the run are left alone (conflicts block the whole rewind).",
         ):
             return
-        self._show_result(await self._run_in_thread(self.actions.rewind, record, step, root, True))
+        self._show_result(
+            await self._run_in_thread(self.actions.rewind, record, step_id, root, True)
+        )
 
     @work
     async def action_view_html(self) -> None:

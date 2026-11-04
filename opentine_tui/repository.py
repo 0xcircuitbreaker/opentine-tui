@@ -31,6 +31,18 @@ except Exception:  # pragma: no cover - opentine < 0.26
         return FORMAT_VERSION
 
 
+try:
+    from opentine._format_v4 import write_format as _pin_writer
+except Exception:  # pragma: no cover - opentine < 0.26
+    _pin_writer = None
+
+if _pin_writer is None:  # pragma: no cover - defensive
+    import contextlib
+
+    def _pin_writer(version: int):
+        return contextlib.nullcontext()
+
+
 try:  # bounded, decompressing (TINEZ1), parser-differential-refusing reads
     from opentine._artifact_io import read_artifact_bytes, read_artifact_json
 except Exception:  # pragma: no cover - defensive
@@ -485,7 +497,10 @@ class RunRepository:
             run = Run.load(out)
             run.tags = list(tags)
             signed = bool(raw.get("signatures"))
-            run.save(out)
+            # Keep a v4 file v4: under OPENTINE_FORMAT=2 a plain save would quietly
+            # rewrite it as the deprecated v2 format.
+            with _pin_writer(ARTIFACT_V4_VERSION):
+                run.save(out)
             return out, not signed
         meta = raw.setdefault("metadata", {})
         if not isinstance(meta, dict):  # pragma: no cover - defensive

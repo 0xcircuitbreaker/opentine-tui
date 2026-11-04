@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -18,6 +19,7 @@ from opentine_tui.repository import (
     RunRecord,
     RunRepository,
     current_format,
+    safe_filename,
     verify_integrity,
 )
 
@@ -153,6 +155,31 @@ def _redacts(tags: list[str]) -> bool:
         return list(redact_value(list(tags))) != list(tags)
     except Exception:  # pragma: no cover - defensive
         return False
+
+
+def _write_private(target: Path, text: str, mode: int) -> None:
+    """Write ``text`` to ``target`` atomically, created at ``mode`` from the start.
+
+    A fresh ``mkstemp`` file (0600, ``O_EXCL``, never a symlink) in the same
+    directory is filled and then renamed over the target. Opening the target
+    itself would follow a symlink planted there, and ``O_TRUNC`` on an existing
+    0644 file keeps 0644 — leaving the seed world-readable until a chmod.
+    """
+    import tempfile
+
+    descriptor, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp = Path(temp_name)
+        temp.chmod(mode)
+        temp.replace(target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(temp_name).unlink()
+        raise
 
 
 def _fail(title: str, message: str, path: str | Path | None = None) -> ActionResult:
@@ -689,19 +716,20 @@ class RunActionService:
         # Overwriting a private key destroys the only copy of a signing identity
         # and makes every artifact it signed unverifiable, which is why
         # `tine keygen` refuses without --force.
-        if out.exists() and not force:
+        pub = out.with_name(out.name + ".pub")
+        if (out.exists() or out.is_symlink()) and not force:
             return _fail("Keygen refused", f"{out} already exists; enable Force to replace it.")
+        for target in (out, pub):
+            if target.is_symlink():
+                # Writing "through" a link would put the seed wherever it points.
+                return _fail(
+                    "Keygen refused", f"{target} is a symbolic link; refusing to follow it."
+                )
         try:
             private_hex, public_hex = signing.generate_ed25519()
             out.parent.mkdir(parents=True, exist_ok=True)
-            # Create the file private, then write: an 0644 window between write and
-            # chmod is long enough for another local process to read the seed.
-            descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(private_hex + "\n")
-            out.chmod(0o600)
-            pub = out.with_name(out.name + ".pub")
-            pub.write_text(public_hex + "\n", encoding="utf-8")
+            _write_private(out, private_hex + "\n", 0o600)
+            _write_private(pub, public_hex + "\n", 0o644)
         except Exception as exc:
             return ActionResult(False, "Keygen failed", f"{type(exc).__name__}: {exc}")
         return ActionResult(
@@ -737,18 +765,19 @@ class RunActionService:
                 f"Run is not resumable: manifest kind={kind!r} does not declare resume support.",
                 path=Path(path),
             )
+        signed = self.repository.inspect_path(path).has_signature
         try:
             resumed = Run.resume(path)
             saved = self.repository.save(resumed, path)
         except Exception as exc:
             return ActionResult(False, "Resume failed", str(exc), path=Path(path))
-
+        note = "\nThe signature was removed by this re-save — re-sign with 's'." if signed else ""
         return ActionResult(
             True,
             "Resumed",
             (
                 f"Loaded resumable run {short_id(resumed.id)} "
-                f"({len(resumed.steps)} steps)\nSaved: {saved}"
+                f"({len(resumed.steps)} steps)\nSaved: {saved}{note}"
             ),
             run=resumed,
             path=saved,
@@ -936,17 +965,20 @@ class RunActionService:
         out = (
             Path(save_path).expanduser()
             if save_path
-            else (self.repository.runs_dir / f"{record.path.stem}.edit-{short_id(step_id)}.tine")
+            else (
+                self.repository.runs_dir
+                / f"{safe_filename(record.path.stem)}.edit-{safe_filename(short_id(step_id))}.tine"
+            )
         )
         if out.exists():
             return _fail(
                 "Fork blocked", f"{out} already exists; choose another save path.", record.path
             )
-        argv = ["fork", arg_path(record.path), "--from-step", step_id, "--save", arg_path(out)]
-        for item in sets:
-            argv += ["--set", item]
-        for item in unsets:
-            argv += ["--unset", item]
+        # `--opt=value` form throughout: a step id comes out of the artifact and an
+        # edit is typed by the user, and either could start with "-".
+        argv = ["fork", arg_path(record.path), f"--from-step={step_id}", f"--save={arg_path(out)}"]
+        argv += [f"--set={item}" for item in sets]
+        argv += [f"--unset={item}" for item in unsets]
         result = run_tine(argv, env=self._child_env())
         if not result.ok:
             return _fail(
@@ -972,21 +1004,24 @@ class RunActionService:
         run = record.run
         if run is None:
             return _fail("Rewind failed", "Run is not loaded.", record.path)
-        try:
-            step_id = resolve_step_ref(run, step_ref)
-        except Exception as exc:
-            return _fail("Rewind failed", str(exc), record.path)
-        index = next(i for i, step in enumerate(run.steps) if step.id == step_id)
+        target = arg_path(record.path)
+        if step_ref is not None:
+            try:
+                step_id = resolve_step_ref(run, step_ref)
+            except Exception as exc:
+                return _fail("Rewind failed", str(exc), record.path)
+            index = next(i for i, step in enumerate(run.steps) if step.id == step_id)
+            target = f"{target}@{index}"
+        elif "@" in target:
+            return _fail(
+                "Rewind failed",
+                "Select a step: this path contains '@', which tine reads as a step marker.",
+                record.path,
+            )
         directory = Path(root).expanduser()
         if not directory.is_dir():
             return _fail("Rewind failed", f"Not a directory: {root}", record.path)
-        argv = [
-            "rewind",
-            f"{arg_path(record.path)}@{index}",
-            "--root",
-            arg_path(directory),
-            "--json",
-        ]
+        argv = ["rewind", target, f"--root={arg_path(directory)}", "--json"]
         if apply:
             argv.append("--apply")
         payload, failure = self._tine("Rewind failed", argv)

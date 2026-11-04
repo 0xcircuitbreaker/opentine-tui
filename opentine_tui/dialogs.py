@@ -221,7 +221,7 @@ class HarnessOptionsModal(ModalScreen[HarnessOptions | None]):
         try:
             extra_args = tuple(shlex.split(self._input_value("#extra")))
         except ValueError as exc:
-            self.query_one("#harness-error", Static).update(str(exc))
+            self.query_one("#harness-error", Static).update(escape_markup(str(exc)))
             return None
 
         login_env = self.query_one("#login", Switch).value
@@ -294,7 +294,7 @@ class _Dialog(ModalScreen):
         return self.query_one(selector, Switch).value
 
     def _error(self, message: str) -> None:
-        self.query_one("#dialog-error", Static).update(message)
+        self.query_one("#dialog-error", Static).update(escape_markup(message))
 
     def key_escape(self) -> None:
         self.dismiss(None)
@@ -394,7 +394,7 @@ class BudgetModal(ModalScreen[BudgetOptions | None]):
                 strict_cost=self.query_one("#strict_cost", Switch).value,
             )
         except ValueError as exc:
-            self.query_one("#dialog-error", Static).update(f"Invalid number: {exc}")
+            self.query_one("#dialog-error", Static).update(escape_markup(f"Invalid number: {exc}"))
             return
         self.dismiss(options)
 
