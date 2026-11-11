@@ -5,6 +5,40 @@ All notable changes to opentine-tui are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.0] - 2026-11-11
+
+Tracks opentine 0.50.0. Requires `opentine>=0.50,<0.51`.
+
+### Added
+- **`.tine` v5 support.** v5 files (the default writer since 0.42) are labelled
+  v5 and treated as current; tag edits keep v5 files v5 and v4 files v4.
+- **Encrypted signing keys** (0.41). Keygen writes encrypted PKCS#8 behind a
+  masked, confirmed passphrase; a plaintext key must be asked for explicitly
+  (with a confirmation). Signing takes the passphrase in the dialog or from
+  `OPENTINE_KEY_PASSPHRASE`. `Ctrl+K` encrypts a legacy plaintext key.
+- **Assurance tiers** (0.39): the verify report shows the verified and claimed
+  tier; the details panel shows the run's claimed tier, labelled as a claim.
+- **Explain** (`X`), **compliance check** (`C`, EU AI Act / FRE 902 / eIDAS
+  profiles), **evidence report** (`R`, HTML or PDF) and **audit kit** (`A`).
+- Repository tab: **secret scan** (`D`), **op log** (`O`), **undo** (`u`),
+  **hold / release** (`L`) and **merge** (`M`).
+- New import formats and harnesses (HAR, agent-trace, pi-session, Cline/Roo,
+  ...) appear automatically from opentine's registries.
+
+### Security
+- Signing an encrypted key no longer reaches opentine's `getpass` fallback,
+  which would have taken over the terminal the TUI draws on.
+- Replay with a harness sends the run's recorded prompt only when the user
+  vouches for it, matching `tine replay` since 0.35; harness dialogs no longer
+  pre-fill it from the artifact.
+- `explain` runs with `--no-store`, so reading a summary never rewrites a run.
+- Audit kits never pass `--allow-unredacted`; undo and merge refuse values
+  that look like options.
+
+### Fixed
+- `--json` failures (opentine 0.36's `{"error": ...}` envelope) show their
+  message instead of a raw JSON blob or an empty report.
+
 ## [0.34.0] - 2026-11-04
 
 Tracks opentine 0.34.0. Requires `opentine>=0.34,<0.35`. The version number now

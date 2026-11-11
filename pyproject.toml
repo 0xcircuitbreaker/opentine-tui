@@ -1,6 +1,6 @@
 [project]
 name = "opentine-tui"
-version = "0.34.0"
+version = "0.50.0"
 description = "Terminal dashboard for opentine — visual management console with Textual"
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,15 +27,17 @@ dependencies = [
     # identify the fork act, and 0.5 added OpenTelemetry GenAI export plus the
     # trace importers. 0.26 made format v4 the default writer, and 0.22-0.34 added
     # rewind, the HTML viewer, offline verify, replay fidelity and fork edits —
-    # this dashboard surfaces all of it. The upper bound is deliberate: opentine
-    # states its data-compatibility guarantee per release, not its API's.
-    "opentine>=0.34,<0.35",
+    # 0.35-0.50 added .tine v5, encrypted keys, assurance tiers, compliance and
+    # audit kits, the op log and holds — this dashboard surfaces all of it. The
+    # upper bound is deliberate: opentine states its data-compatibility guarantee
+    # per release, not its API's.
+    "opentine>=0.50,<0.51",
     "textual>=3.0,<9",
 ]
 
 [project.optional-dependencies]
 # Ed25519 signing/keygen in the dashboard (HMAC-SHA256 works without it).
-crypto = ["opentine[crypto]>=0.34,<0.35"]
+crypto = ["opentine[crypto]>=0.50,<0.51"]
 dev = [
     "build>=1.2",
     "pytest>=9.0",

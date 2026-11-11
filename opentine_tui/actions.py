@@ -959,6 +959,104 @@ class RunActionService:
             refresh=True,
         )
 
+    # -- opentine 0.39-0.50: explain, compliance, evidence --------------------
+
+    def explain(self, record: RunRecord) -> ActionResult:
+        """``tine explain``: what the run did, in one page (0.42).
+
+        ``--no-store`` because explaining is a read: by default the CLI files the
+        summary as an annotation on the run, which would rewrite the artifact.
+        """
+        payload, failure = self._tine(
+            "Explain failed", ["explain", arg_path(record.path), "--no-store", "--json"]
+        )
+        if failure:
+            return failure
+        return ActionResult(True, "Explain", explain_text(payload), path=record.path)
+
+    def compliance_profiles(self) -> list[tuple[str, str]]:
+        """``(name, title)`` for every profile ``tine compliance list`` knows."""
+        payload, failure = self._tine("Compliance", ["compliance", "list", "--json"])
+        if failure or not isinstance(payload, dict):
+            return []
+        return [
+            (str(item.get("name")), str(item.get("title") or item.get("name")))
+            for item in payload.get("profiles") or []
+            if isinstance(item, dict) and item.get("name")
+        ]
+
+    def compliance(self, record: RunRecord, profile: str) -> ActionResult:
+        """``tine compliance check --profile`` (0.48): evidence per requirement."""
+        payload, failure = self._tine(
+            "Compliance check failed",
+            ["compliance", "check", arg_path(record.path), f"--profile={profile}", "--json"],
+        )
+        if failure:
+            return failure
+        if not isinstance(payload, dict):
+            return _fail("Compliance check failed", "tine returned no report", record.path)
+        statuses = [
+            str(item.get("status"))
+            for item in payload.get("requirements") or []
+            if isinstance(item, dict)
+        ]
+        met = statuses.count("evidenced")
+        return ActionResult(
+            bool(statuses) and met == len(statuses),
+            f"Compliance: {profile} — {met}/{len(statuses)} evidenced",
+            compliance_text(payload),
+            path=record.path,
+        )
+
+    def evidence_report(
+        self, record: RunRecord, out: str, fmt: str = "html", overwrite: bool = False
+    ) -> ActionResult:
+        """``tine evidence report`` (0.39): a human-readable evidence page."""
+        if fmt not in ("html", "pdf"):
+            return _fail("Evidence report failed", f"unknown format {fmt!r}", record.path)
+        target = Path(out).expanduser()
+        if target.is_dir():
+            return _fail("Evidence report failed", f"{target} is a directory.", record.path)
+        if target.exists() and not overwrite:
+            return _fail("Evidence report blocked", f"{target} already exists.", record.path)
+        _payload, failure = self._tine(
+            "Evidence report failed",
+            [
+                "evidence",
+                "report",
+                arg_path(record.path),
+                f"--format={fmt}",
+                f"--out={arg_path(target)}",
+                "--json",
+            ],
+        )
+        if failure:
+            return failure
+        return ActionResult(True, "Evidence report written", f"Saved: {target}", path=target)
+
+    def audit_kit(self, record: RunRecord, out_dir: str, as_zip: bool = True) -> ActionResult:
+        """``tine audit-kit build`` (0.49): a self-verifying folder for an auditor.
+
+        Never passes ``--allow-unredacted``: a kit is made to be handed over.
+        """
+        target = Path(out_dir).expanduser()
+        if target.exists() or (as_zip and target.with_suffix(".zip").exists()):
+            return _fail("Audit kit blocked", f"{target} already exists.", record.path)
+        argv = ["audit-kit", "build", arg_path(record.path), f"--out={arg_path(target)}", "--json"]
+        if as_zip:
+            argv.append("--zip")
+        payload, failure = self._tine("Audit kit failed", argv)
+        if failure:
+            return failure
+        lines = [f"Saved: {target}" + (f" (+ {target.with_suffix('.zip').name})" if as_zip else "")]
+        if isinstance(payload, dict):
+            lines.append("")
+            for check in payload.get("checks") or []:
+                if isinstance(check, dict):
+                    glyph = _OUTCOME_GLYPHS.get(str(check.get("outcome")), "·")
+                    lines.append(f"{glyph} {check.get('name')}: {check.get('detail', '')}")
+        return ActionResult(True, "Audit kit built", "\n".join(lines), path=target)
+
     # -- opentine 0.22-0.34 features, driven through `tine` ---------------
 
     def _tine(self, title: str, argv: list[str]) -> tuple[Any, ActionResult | None]:
@@ -1176,6 +1274,79 @@ class RunActionService:
 
 
 # -- opentine 0.25-0.34 features, driven through `tine` --------------------
+
+
+def explain_text(payload: Any) -> str:
+    """Render an ``opentine-explain/1`` summary."""
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    if not isinstance(summary, dict):
+        return "tine returned no summary"
+    outcome = summary.get("outcome") or {}
+    steps = summary.get("steps") or {}
+    lines = [
+        f"asked: {_clip(summary.get('asked'), 300)}",
+        f"outcome: {outcome.get('status', '?')}",
+    ]
+    final = outcome.get("final_text")
+    if final:
+        lines.append(f"final answer: {_clip(final, 300)}")
+    by_kind = steps.get("by_kind") or {}
+    lines.append(
+        f"steps: {steps.get('total', '?')}  "
+        + "  ".join(f"{kind}={count}" for kind, count in sorted(by_kind.items()))
+    )
+    models = summary.get("models") or []
+    if models:
+        lines.append(f"models: {', '.join(map(str, models))}")
+    tools = summary.get("tools") or {}
+    if tools:
+        lines.append(
+            "tools: " + ", ".join(f"{name} x{count}" for name, count in sorted(tools.items()))
+        )
+    if summary.get("failed_tool_calls"):
+        lines.append(f"failed tool calls: {summary['failed_tool_calls']}")
+    for label, key in (
+        ("files read", "files_read"),
+        ("files written", "files_written"),
+        ("hosts", "hosts"),
+    ):
+        values = summary.get(key) or []
+        if values:
+            shown = ", ".join(map(str, values[:12]))
+            more = f" (+{len(values) - 12} more)" if len(values) > 12 else ""
+            lines.append(f"{label}: {shown}{more}")
+    errors = summary.get("errors") or []
+    if errors:
+        lines.append("errors:")
+        lines += [f"  {_clip(error, 200)}" for error in errors[:8]]
+    narrative = payload.get("narrative")
+    if narrative:
+        lines += ["", str(narrative)]
+    return "\n".join(lines)
+
+
+def compliance_text(payload: dict[str, Any]) -> str:
+    """Render an ``opentine.compliance-report`` — requirement by requirement."""
+    lines = []
+    notice = payload.get("notice")
+    if notice:
+        lines += [f"({notice})", ""]
+    marks = {"evidenced": "✓", "partial": "~", "missing": "✗", "not-applicable": "-"}
+    for item in payload.get("requirements") or []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "?"))
+        lines.append(f"{marks.get(status, '?')} {item.get('cite', item.get('id', '?'))}: {status}")
+        for evidence in item.get("evidence") or []:
+            if isinstance(evidence, dict) and evidence.get("status") != "evidenced":
+                lines.append(f"    {evidence.get('fact')}: {_clip(evidence.get('detail'), 160)}")
+    return "\n".join(lines) or "tine returned no requirements"
+
+
+def _clip(value: Any, limit: int) -> str:
+    text = str(value if value is not None else "").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
 
 _OUTCOME_GLYPHS = {
     "pass": "✓",

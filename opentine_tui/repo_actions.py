@@ -402,3 +402,153 @@ class RepoActionService:
         except ACTION_ERRORS as exc:
             return _fail("Inspect failed", exc)
         return ActionResult(True, f"Object {short_oid(oid)}", json.dumps(data, indent=2)[:20000])
+
+    # -- opentine 0.35-0.50: redaction, op log, undo, holds, merge -------------
+
+    def _tine(self, title: str, argv: list[str]) -> tuple[Any, ActionResult | None]:
+        """Run ``tine ARGV --repo=<this repository> --json``; parse or report."""
+        result = run_tine([*argv, f"--repo={arg_path(self.repo.worktree)}", "--json"])
+        payload = result.json()
+        message = cli_error(payload)
+        if message is not None:
+            return None, ActionResult(False, title, message)
+        if not isinstance(payload, dict):
+            return None, ActionResult(
+                False, title, result.text or f"tine exited {result.returncode}"
+            )
+        return payload, None
+
+    def explain(self, record: RepoRunRecord) -> ActionResult:
+        """``tine explain`` for a run object; ``--no-store`` keeps it a read."""
+        from opentine_tui.actions import explain_text
+
+        payload, failure = self._tine("Explain failed", ["explain", record.oid, "--no-store"])
+        if failure:
+            return failure
+        return ActionResult(True, "Explain", explain_text(payload))
+
+    def redact_check(self, record: RepoRunRecord) -> ActionResult:
+        """``tine redact check`` (0.45): scan a run's objects for leaked secrets.
+
+        Findings name object ids and rules, never the matched bytes.
+        """
+        payload, failure = self._tine(
+            "Redaction check failed", ["redact", "check", f"--run={record.oid}"]
+        )
+        if failure:
+            return failure
+        lines = []
+        for report in payload.get("reports") or []:
+            if not isinstance(report, dict):
+                continue
+            lines.append(
+                f"{short_oid(str(report.get('run', '?')))}: "
+                f"{'clean' if report.get('clean') else 'FINDINGS'} "
+                f"({report.get('objects', '?')} objects, {report.get('ruleset', '?')})"
+            )
+            for finding in (report.get("findings") or [])[:40]:
+                if isinstance(finding, dict):
+                    where = finding.get("oid") or finding.get("object") or "?"
+                    rule = finding.get("rule") or finding.get("kind") or "?"
+                    lines.append(f"  ✗ {short_ref(str(where))}  {rule}")
+                else:
+                    lines.append(f"  ✗ {finding}")
+        clean = bool(payload.get("clean"))
+        return ActionResult(
+            clean,
+            "No secrets found" if clean else "Redaction findings",
+            "\n".join(lines) or "nothing scanned",
+        )
+
+    def op_log(self, limit: int = 50) -> ActionResult:
+        """``tine op log`` (0.36): every repository operation, newest first."""
+        payload, failure = self._tine("Op log failed", ["op", "log", f"--limit={limit}"])
+        if failure:
+            return failure
+        ops = [op for op in payload.get("ops") or [] if isinstance(op, dict)]
+        lines = []
+        for op in reversed(ops):
+            refs = ", ".join(
+                f"{ref.get('ref')} {short_ref(str(ref.get('old') or '∅'))}"
+                f"→{short_ref(str(ref.get('new') or '∅'))}"
+                for ref in op.get("refs") or []
+                if isinstance(ref, dict)
+            )
+            undo = f"  (undoes {op['undoes']})" if op.get("undoes") else ""
+            lines.append(
+                f"{op.get('index', '?'):>3} {op.get('id', '?')}  "
+                f"{op.get('command', '?'):<10} {op.get('actor', '')}  {refs}{undo}"
+            )
+        return ActionResult(True, "Operation log", "\n".join(lines) or "(no operations yet)")
+
+    def undo(self, op: str | None = None, force: bool = False) -> ActionResult:
+        """``tine undo [OP]``: restore the refs an operation moved (0.36)."""
+        argv = ["undo"]
+        if op:
+            if op.startswith("-"):
+                return ActionResult(False, "Undo refused", f"{op!r} is not an operation id.")
+            argv.append(op)
+        if force:
+            argv.append("--force")
+        payload, failure = self._tine("Undo failed", argv)
+        if failure:
+            return failure
+        return ActionResult(True, "Undone", _render_payload(payload), refresh=True)
+
+    def holds(self) -> set[str]:
+        payload, failure = self._tine("Holds", ["hold", "list"])
+        if failure:
+            return set()
+        return {
+            str(item.get("oid"))
+            for item in payload.get("holds") or []
+            if isinstance(item, dict) and item.get("oid")
+        }
+
+    def toggle_hold(self, record: RepoRunRecord) -> ActionResult:
+        """``tine hold add|release`` (0.35): keep a run out of gc and purge."""
+        release = record.oid in self.holds()
+        _payload, failure = self._tine(
+            "Hold failed", ["hold", "release" if release else "add", record.oid]
+        )
+        if failure:
+            return failure
+        if release:
+            return ActionResult(
+                True, "Hold released", f"{record.short_id} can be collected by gc again."
+            )
+        return ActionResult(
+            True,
+            "Run held",
+            f"{record.short_id} is held: gc and purge keep it until it is released.",
+        )
+
+    def merge(self, record: RepoRunRecord, theirs: str, ref: str = "") -> ActionResult:
+        """``tine merge OURS THEIRS`` (0.47): a run with both as parents."""
+        theirs = theirs.strip()
+        if not theirs:
+            return ActionResult(False, "Merge failed", "Name the run to merge in.")
+        if theirs.startswith("-"):
+            return ActionResult(False, "Merge refused", f"{theirs!r} is not a ref or run id.")
+        argv = ["merge", record.oid, theirs]
+        if ref:
+            argv.append(f"--ref={ref}")
+        payload, failure = self._tine("Merge failed", argv)
+        if failure:
+            return failure
+        return ActionResult(True, "Merged", _render_payload(payload), refresh=True)
+
+
+def _render_payload(payload: dict[str, Any]) -> str:
+    """Key: value lines for a small CLI result, ids shortened."""
+    lines = []
+    for key, value in sorted(payload.items()):
+        if key in ("command", "exit_code"):
+            continue
+        if isinstance(value, str):
+            lines.append(f"{key}: {short_ref(value)}")
+        elif isinstance(value, list | dict):
+            lines.append(f"{key}: {json.dumps(value)[:300]}")
+        else:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines) or "done"

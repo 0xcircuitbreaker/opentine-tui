@@ -1344,3 +1344,37 @@ class TraceImportModal(_Dialog):
                 overwrite=self._switch("#overwrite"),
             )
         )
+
+
+class ChoiceModal(_Dialog):
+    """Pick one of a few named options (e.g. a compliance profile)."""
+
+    DEFAULT_CSS = _DIALOG_CSS % {"name": "ChoiceModal"}
+
+    def __init__(self, title: str, choices: list[tuple[str, str]], note: str = "") -> None:
+        super().__init__()
+        self.title_text = title
+        self.choices = list(choices)
+        self.note = note
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="dialog"):
+            yield Label(f"[bold #FF6900]{escape_markup(self.title_text)}[/]")
+            if self.note:
+                yield Static(f"[dim]{escape_markup(self.note)}[/]")
+            yield Select(
+                [(escape_markup(f"{name} — {title}"), name) for name, title in self.choices],
+                value=self.choices[0][0],
+                allow_blank=False,
+                id="choice",
+            )
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("OK", id="ok", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ok":
+            self.dismiss(None)
+            return
+        self.dismiss(str(self.query_one("#choice", Select).value))

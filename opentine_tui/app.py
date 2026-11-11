@@ -33,6 +33,7 @@ from opentine_tui.actions import (
 )
 from opentine_tui.dialogs import (
     BudgetModal,
+    ChoiceModal,
     ConfirmationModal,
     CopyMenuModal,
     EvaluateModal,
@@ -84,7 +85,19 @@ OPENTINE_THEME = Theme(
 # Files tab. File-only actions (tag, budget, sign, ...) stay enabled on the
 # Repository tab on purpose: pressing one there explains *why* a v3 object cannot
 # be edited and how to get to the Files tab, which a silently dead key would not.
-REPO_ONLY_ACTIONS = frozenset({"promote", "evaluate", "repo_log", "inspect_object"})
+REPO_ONLY_ACTIONS = frozenset(
+    {
+        "promote",
+        "evaluate",
+        "repo_log",
+        "inspect_object",
+        "redact_check",
+        "op_log",
+        "undo",
+        "toggle_hold",
+        "merge_runs",
+    }
+)
 # Never blocked while an action runs: they read state, move focus or change the view.
 SAFE_WHILE_BUSY = frozenset(
     {
@@ -120,6 +133,16 @@ COMMAND_GROUPS = {
     "inspect_object": "Repo",
     "export_otel": "Interop",
     "import_trace": "Interop",
+    "redact_check": "Repo",
+    "op_log": "Repo",
+    "undo": "Repo",
+    "toggle_hold": "Repo",
+    "merge_runs": "Repo",
+    "explain": "Assurance",
+    "compliance": "Assurance",
+    "evidence_report": "Assurance",
+    "audit_kit": "Assurance",
+    "verify_report": "Assurance",
 }
 _PALETTE_SKIP = frozenset({"quit", "focus_left", "focus_center", "focus_right"})
 
@@ -383,6 +406,70 @@ class OpentineTUI(App):
             "HTML view",
             show=False,
             tooltip="tine view: write a self-contained HTML page for the run",
+        ),
+        # opentine 0.35-0.50
+        Binding(
+            "X",
+            "explain",
+            "Explain",
+            show=False,
+            tooltip="tine explain: what the run asked, did, touched and ended with",
+        ),
+        Binding(
+            "C",
+            "compliance",
+            "Compliance",
+            show=False,
+            tooltip="tine compliance check: evidence per requirement (EU AI Act, FRE 902, eIDAS)",
+        ),
+        Binding(
+            "R",
+            "evidence_report",
+            "Evidence report",
+            show=False,
+            tooltip="tine evidence report: an HTML or PDF evidence page for the run",
+        ),
+        Binding(
+            "A",
+            "audit_kit",
+            "Audit kit",
+            show=False,
+            tooltip="tine audit-kit build: a self-verifying folder (and zip) for an auditor",
+        ),
+        Binding(
+            "D",
+            "redact_check",
+            "Secret scan",
+            show=False,
+            tooltip="tine redact check: scan a repository run's objects for leaked secrets",
+        ),
+        Binding(
+            "O",
+            "op_log",
+            "Op log",
+            show=False,
+            tooltip="tine op log: every operation that moved a ref in this repository",
+        ),
+        Binding(
+            "u",
+            "undo",
+            "Undo",
+            show=False,
+            tooltip="tine undo: restore the refs an operation moved",
+        ),
+        Binding(
+            "L",
+            "toggle_hold",
+            "Hold",
+            show=False,
+            tooltip="tine hold: keep (or release) a run so gc and purge never delete it",
+        ),
+        Binding(
+            "M",
+            "merge_runs",
+            "Merge",
+            show=False,
+            tooltip="tine merge: a run with the selected run and another as parents",
         ),
         # interop (0.5.0)
         Binding(
@@ -1491,6 +1578,139 @@ class OpentineTUI(App):
                 if not self._busy and scroll is not None:
                     scroll.loading = False
                 self.refresh_bindings()
+
+    # -- opentine 0.35-0.50 ------------------------------------------------
+
+    @work
+    async def action_explain(self) -> None:
+        if self.repo_mode:
+            record = self._require_repo_record()
+            if record is not None:
+                self._show_result(await self._run_in_thread(self._repo_service().explain, record))
+            return
+        record = self._require_loaded()
+        if record is not None:
+            self._show_result(await self._run_in_thread(self.actions.explain, record))
+
+    @work
+    async def action_compliance(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        profiles = await asyncio.to_thread(self.actions.compliance_profiles)
+        if not profiles:
+            self._show_result(
+                ActionResult(False, "Compliance", "tine listed no compliance profiles.")
+            )
+            return
+        profile = await self.push_screen_wait(
+            ChoiceModal(
+                "Compliance profile",
+                profiles,
+                note="Draft profiles — not legal advice, pending counsel review.",
+            )
+        )
+        if profile:
+            self._show_result(await self._run_in_thread(self.actions.compliance, record, profile))
+
+    @work
+    async def action_evidence_report(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        out = await self.push_screen_wait(
+            TextInputModal(
+                "Evidence report (.html or .pdf)",
+                "output path",
+                value=str(record.path.with_suffix(".evidence.html")),
+            )
+        )
+        if not out:
+            return
+        fmt = "pdf" if out.lower().endswith(".pdf") else "html"
+        result = await self._run_in_thread(self.actions.evidence_report, record, out, fmt)
+        if not result.ok and "already exists" in result.message:
+            if not await self._confirm("Replace evidence report", f"{out} exists.", "Replace"):
+                self._show_result(result)
+                return
+            result = await self._run_in_thread(self.actions.evidence_report, record, out, fmt, True)
+        self._show_result(result)
+
+    @work
+    async def action_audit_kit(self) -> None:
+        record = self._require_loaded()
+        if record is None:
+            return
+        out = await self.push_screen_wait(
+            TextInputModal(
+                "Build an audit kit",
+                "output folder (a .zip is written beside it)",
+                value=str(record.path.with_name(record.path.stem + "-audit-kit")),
+            )
+        )
+        if out:
+            self._show_result(await self._run_in_thread(self.actions.audit_kit, record, out))
+
+    @work
+    async def action_redact_check(self) -> None:
+        record = self._require_repo_record()
+        if record is not None:
+            self._show_result(await self._run_in_thread(self._repo_service().redact_check, record))
+
+    @work
+    async def action_op_log(self) -> None:
+        if self.v3 is None or self.repo_actions is None:
+            self._require_repo_record()  # explains there is no repository
+            return
+        self._show_result(await self._run_in_thread(self._repo_service().op_log))
+
+    @work
+    async def action_undo(self) -> None:
+        if self.v3 is None:
+            self._require_repo_record()
+            return
+        log = await self._run_in_thread(self._repo_service().op_log)
+        self._show_result(log)
+        if not log.ok:
+            return
+        op = await self.push_screen_wait(
+            TextInputModal("Undo which operation?", "op id, prefix or index (blank: the latest)")
+        )
+        if op is None:
+            return
+        if not await self._confirm(
+            "Undo operation",
+            f"Restore the refs {'operation ' + op if op else 'the latest operation'} moved? "
+            "Objects are not deleted; refs move back (and the undo is itself logged).",
+            "Undo",
+        ):
+            return
+        self._show_result(await self._run_in_thread(self._repo_service().undo, op or None))
+
+    @work
+    async def action_toggle_hold(self) -> None:
+        record = self._require_repo_record()
+        if record is not None:
+            self._show_result(await self._run_in_thread(self._repo_service().toggle_hold, record))
+
+    @work
+    async def action_merge_runs(self) -> None:
+        record = self._require_repo_record()
+        if record is None:
+            return
+        theirs = await self.push_screen_wait(
+            TextInputModal(f"Merge into {record.display_name}", "ref or run id to merge in")
+        )
+        if not theirs:
+            return
+        ref = await self.push_screen_wait(
+            TextInputModal("Ref for the merge", "e.g. heads/merged (blank: no ref)")
+        )
+        if ref is None:
+            return
+        self._show_result(
+            await self._run_in_thread(self._repo_service().merge, record, theirs, ref.strip())
+        )
 
     # -- opentine 0.22-0.34 ------------------------------------------------
 

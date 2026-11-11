@@ -12,12 +12,14 @@ pip install opentine-tui
 ```
 
 That pulls in [`opentine`](https://github.com/0xcircuitbreaker/opentine)
-`>=0.34,<0.35`. opentine now writes **format v4** artifacts (one canonical
-JCS bundle of v3 envelopes, compressed on disk, signed with `tine-sig/3`) and
-still reads every v1/v2 file and v3 repository; the dashboard reads all of
-them, migrates v1/v2 to v4, and drives the 0.22–0.34 additions — offline
-verify reports, replay fidelity labels, forks with edited steps, rewind, the
-HTML viewer and the session-log importers.
+`>=0.50,<0.51`. opentine now writes **`.tine` v5** artifacts (the v4 bundle of
+v3 envelopes with text blobs spelled as text — same oids and `tine-sig/3`
+signatures, compressed on disk) and still reads every v1/v2/v4 file and v3
+repository; the dashboard reads all of them, migrates v1/v2 to v4, and drives
+the 0.22–0.50 additions — offline verify reports with assurance tiers, replay
+fidelity, forks with edited steps, rewind, encrypted signing keys, compliance
+checks, evidence reports and audit kits, secret scans, the op log, holds and
+merges.
 
 Ed25519 signing and keygen work out of the box: `opentine` 0.4 depends on
 `cryptography` directly. The `crypto` extra is kept as a no-op so
@@ -99,8 +101,18 @@ Press `?` for the full list inside the app — every binding carries a tooltip.
 | `w` | Rewind the files the run edited back to the selected step (dry run first, then confirm) |
 | `H` | Write a self-contained HTML page for the run (`tine view`) |
 | `b` | Set a budget (`max_cost`/`max_usage`/`max_steps`/`max_duration`, breach mode, strict cost) |
-| `s` | Sign the selected run (HMAC-SHA256 or Ed25519, via env var / key file) |
-| `k` | Generate an Ed25519 keypair (refuses to replace an existing key) |
+| `s` | Sign the selected run (HMAC-SHA256, or Ed25519 with an encrypted key and its passphrase) |
+| `k` | Generate an Ed25519 keypair — encrypted PKCS#8 behind a passphrase (refuses to replace an existing key) |
+| `Ctrl+K` | Encrypt a legacy plaintext-hex private key in place (`tine key encrypt`) |
+| `X` | Explain the run: what it asked, did, touched and ended with (`tine explain`, read-only) |
+| `C` | Compliance check against a profile — EU AI Act, FRE 902, eIDAS (draft, not legal advice) |
+| `R` | Write an evidence report, HTML or PDF (`tine evidence report`) |
+| `A` | Build an audit kit: a self-verifying folder and zip for an auditor (`tine audit-kit build`) |
+| `D` | Repository: scan a run's objects for leaked secrets (`tine redact check`) |
+| `O` | Repository: operation log — every op that moved a ref (`tine op log`) |
+| `u` | Repository: undo an operation (`tine undo`; shows the log, asks first) |
+| `L` | Repository: hold / release a run so gc and purge never delete it (`tine hold`) |
+| `M` | Repository: merge another run into the selected one (`tine merge`) |
 | `f` | Fork — from the selected step (file) or the selected event (repository) |
 | `c` | Write a cached replay from the selected step |
 | `d` | Files: field-level diff. Repository: semantic diff between two runs |
@@ -130,6 +142,22 @@ loading indicator until it finishes). Each panel's border shows its focus key an
 counts (`Runs [1] (shown/total)`), and the focused panel is outlined in the
 opentine orange; the app registers an `opentine` theme, so `Ctrl+P` theme
 switching (including light themes) recolours everything.
+
+## What's new for opentine 0.50
+
+- **`.tine` v5** files (the default writer since 0.42) are recognised as v5 —
+  opentine's reader presents them as v4, so they were mislabelled — and tag
+  edits keep a file in the spelling it had.
+- **Encrypted keys** (0.41): `k` writes encrypted PKCS#8 behind a masked,
+  confirmed passphrase; signing asks for it in the dialog (or reads
+  `OPENTINE_KEY_PASSPHRASE`) and never lets opentine prompt on the terminal the
+  TUI is drawing on. `Ctrl+K` encrypts an old plaintext key.
+- **Recorded prompts** (0.35): replaying with a harness sends the run's stored
+  prompt only if you switch on "I vouch for it"; nothing pre-fills it any more.
+- **Assurance tiers** (0.39) in the verify report (`V`) and the details panel.
+- **Explain, compliance, evidence reports, audit kits** (`X`, `C`, `R`, `A`) and,
+  on the Repository tab, **secret scans, op log, undo, holds and merges**
+  (`D`, `O`, `u`, `L`, `M`). All run the real `tine` command.
 
 ## What's new for opentine 0.34
 
@@ -229,7 +257,7 @@ The dashboard now manages the full `.tine` **format v2** surface:
 ## Development
 
 ```bash
-pip install -e ".[dev]"   # resolves opentine>=0.34,<0.35 from PyPI
+pip install -e ".[dev]"   # resolves opentine>=0.50,<0.51 from PyPI
 
 ruff check .
 ruff format --check .
@@ -241,8 +269,8 @@ about what users get. To test against a source checkout instead — a worktree a
 release tag, say — point `OPENTINE_SRC` at it:
 
 ```bash
-git -C ../opentine worktree add /tmp/opentine-v0340 v0.34.0
-OPENTINE_SRC=/tmp/opentine-v0340 pytest
+git -C ../opentine worktree add /tmp/opentine-v0500 v0.50.0
+OPENTINE_SRC=/tmp/opentine-v0500 pytest
 ```
 
 CI runs lint, format, the test suite, a packaging build, and a `twine` metadata
