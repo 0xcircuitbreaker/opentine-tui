@@ -204,7 +204,7 @@ def test_keygen_refuses_to_replace_an_existing_private_key(tmp_path: Path):
     key_path = tmp_path / "signing.key"
     key_path.write_text("existing-secret\n", encoding="utf-8")
 
-    result = service.keygen(key_path)
+    result = service.keygen(key_path, passphrase="correct horse")
 
     assert not result.ok
     assert key_path.read_text(encoding="utf-8") == "existing-secret\n"

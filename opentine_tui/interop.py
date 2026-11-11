@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from opentine_tui.actions import ActionResult
-from opentine_tui.cli_bridge import arg_path, run_tine
+from opentine_tui.cli_bridge import arg_path, cli_error, run_tine
 
 try:
     from opentine import to_otel_genai_document
@@ -262,7 +262,10 @@ class InteropService:
         result = run_tine(argv)
         payload = result.json()
         if not result.ok or not isinstance(payload, dict):
-            return _fail("Import failed", result.text or f"tine exited {result.returncode}")
+            return _fail(
+                "Import failed",
+                cli_error(payload) or result.text or f"tine exited {result.returncode}",
+            )
         run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
         lines = [
             f"{payload.get('events_imported', '?')} event(s) from {source.name} "

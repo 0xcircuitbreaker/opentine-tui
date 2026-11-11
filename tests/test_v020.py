@@ -294,7 +294,7 @@ def test_keygen_sign_verify_ed25519(tmp_path: Path):
     repo = RunRepository(tmp_path)
     service = RunActionService(repo)
 
-    keys = service.keygen(tmp_path / "ed")
+    keys = service.keygen(tmp_path / "ed", passphrase="correct horse")
     assert keys.ok
     assert (tmp_path / "ed").exists()
     assert (tmp_path / "ed.pub").exists()
@@ -302,7 +302,11 @@ def test_keygen_sign_verify_ed25519(tmp_path: Path):
     path = repo.save(_completed_run())
     signed = service.sign(
         repo.inspect_path(path),
-        SignOptions(algorithm="ed25519", ed25519_key_file=str(tmp_path / "ed")),
+        SignOptions(
+            algorithm="ed25519",
+            ed25519_key_file=str(tmp_path / "ed"),
+            passphrase="correct horse",
+        ),
     )
     assert signed.ok, signed.message
 

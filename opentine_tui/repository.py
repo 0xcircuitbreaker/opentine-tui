@@ -44,9 +44,13 @@ if _pin_writer is None:  # pragma: no cover - defensive
 
 
 try:  # bounded, decompressing (TINEZ1), parser-differential-refusing reads
-    from opentine._artifact_io import read_artifact_bytes, read_artifact_json
+    from opentine._artifact_io import (
+        parse_artifact_json,
+        read_artifact_bytes,
+        read_artifact_json,
+    )
 except Exception:  # pragma: no cover - defensive
-    read_artifact_bytes = read_artifact_json = None
+    read_artifact_bytes = read_artifact_json = parse_artifact_json = None
 
 try:
     from opentine._codec import is_wrapped as _is_compressed
@@ -88,7 +92,14 @@ except Exception:  # pragma: no cover - defensive
 DEFAULT_RUNS_DIR = ".tine_runs"
 
 #: Every on-disk version this dashboard reads: v1/v2 files and the v4 bundle.
-READABLE_VERSIONS: tuple[int, ...] = (*SUPPORTED_VERSIONS, ARTIFACT_V4_VERSION)
+#: `.tine` v5 (0.40+, the default writer since 0.42): the v4 document with
+#: UTF-8 text blobs spelled as text. Same oids, root and signatures.
+ARTIFACT_V5_VERSION = 5
+READABLE_VERSIONS: tuple[int, ...] = (
+    *SUPPORTED_VERSIONS,
+    ARTIFACT_V4_VERSION,
+    ARTIFACT_V5_VERSION,
+)
 #: The newest format opentine knows; anything above it was written by a newer tool.
 NEWEST_VERSION = max(READABLE_VERSIONS)
 #: Refuse to read anything bigger than opentine itself would load.
@@ -147,6 +158,34 @@ def verify_integrity(path: str | Path) -> Any:
     )
 
 
+#: How a v5 document spells itself at the top level (canonical JSON, no
+#: whitespace). Inside a JSON string these quotes would be escaped, so the only
+#: unescaped occurrence is the document's own header.
+_V5_HEADER = re.compile(rb'"format_version":\s*5\s*,\s*"kind":\s*"tine-artifact/5"')
+
+
+def read_stored(path: Path) -> tuple[dict[str, Any] | None, int | None]:
+    """``(document, stored_version)`` for a portable artifact.
+
+    opentine reads a ``.tine`` v5 file (the default writer since 0.42) as the v4
+    document it spells — same oids, root and signatures, with text blobs written
+    as text. That view is what every check needs, but it hides the version on
+    disk, so the stored spelling is detected separately: ``5`` for a v5 file,
+    else ``None`` (the document's own version applies).
+    """
+    try:
+        if read_artifact_bytes is None:  # pragma: no cover - defensive
+            return read_raw(path), None
+        body = read_artifact_bytes(path)
+        data = parse_artifact_json(body)
+    except Exception:
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    stored = 5 if is_v4_artifact(data) and _V5_HEADER.search(body) else None
+    return data, stored
+
+
 def read_raw(path: Path) -> dict[str, Any] | None:
     """Parse the raw .tine JSON (pre-migration, on-disk view), or None if unreadable.
 
@@ -167,7 +206,9 @@ def read_raw(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _detect_on_disk(raw: dict[str, Any] | None) -> tuple[int | None, str]:
+def _detect_on_disk(
+    raw: dict[str, Any] | None, stored: int | None = None
+) -> tuple[int | None, str]:
     """Classify a file by its ON-DISK format version.
 
     Critical: the loaded ``Run`` and the run index both report the migrated
@@ -177,6 +218,8 @@ def _detect_on_disk(raw: dict[str, Any] | None) -> tuple[int | None, str]:
     if raw is None:
         return None, "unreadable"
     if is_v4_artifact(raw):
+        if stored == ARTIFACT_V5_VERSION:
+            return ARTIFACT_V5_VERSION, f"v{ARTIFACT_V5_VERSION}"
         return ARTIFACT_V4_VERSION, f"v{ARTIFACT_V4_VERSION}"
     declared = raw.get("format_version")
     if isinstance(declared, int) and not isinstance(declared, bool) and declared > NEWEST_VERSION:
@@ -260,7 +303,12 @@ class RunRecord:
 
     @property
     def is_v4(self) -> bool:
-        return self.on_disk_version == ARTIFACT_V4_VERSION
+        """A v4-family bundle: ``tine-artifact/4`` or its v5 spelling."""
+        return self.on_disk_version in (ARTIFACT_V4_VERSION, ARTIFACT_V5_VERSION)
+
+    @property
+    def is_v5(self) -> bool:
+        return self.on_disk_version == ARTIFACT_V5_VERSION
 
     @property
     def can_upgrade(self) -> bool:
@@ -378,8 +426,8 @@ class RunRepository:
         except OSError:
             mtime = 0.0
 
-        raw = read_raw(run_path)
-        on_disk_version, version_label = _detect_on_disk(raw)
+        raw, stored = read_stored(run_path)
+        on_disk_version, version_label = _detect_on_disk(raw, stored)
         integrity = verify_integrity(run_path)
         signature = _signature_status(raw)
 
@@ -490,16 +538,17 @@ class RunRepository:
         signature as dropped.
         """
         out = Path(path)
-        raw = read_raw(out)
+        raw, stored = read_stored(out)
         if raw is None:
             raise ValueError("cannot edit tags: file is not a readable .tine artifact")
         if is_v4_artifact(raw):
             run = Run.load(out)
             run.tags = list(tags)
             signed = bool(raw.get("signatures"))
-            # Keep a v4 file v4: under OPENTINE_FORMAT=2 a plain save would quietly
-            # rewrite it as the deprecated v2 format.
-            with _pin_writer(ARTIFACT_V4_VERSION):
+            # Keep the file in the spelling it had: under OPENTINE_FORMAT=2 a plain
+            # save would rewrite a v4 file as the deprecated v2, and pinning 4
+            # would quietly turn a v5 file back into v4.
+            with _pin_writer(stored or ARTIFACT_V4_VERSION):
                 run.save(out)
             return out, not signed
         meta = raw.setdefault("metadata", {})

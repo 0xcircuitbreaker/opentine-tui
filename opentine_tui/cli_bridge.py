@@ -137,3 +137,20 @@ def run_tine(
     except OSError as exc:
         return CliResult(-1, "", f"{type(exc).__name__}: {exc}")
     return CliResult(completed.returncode, _decode(completed.stdout), _decode(completed.stderr))
+
+
+def cli_error(payload: Any) -> str | None:
+    """The message of a ``--json`` failure envelope (opentine 0.36+), else ``None``.
+
+    Every subcommand reports a failure as ``{"error": {"code", "exit_code",
+    "message"}}`` on stdout; ``None`` means the payload is not one.
+    """
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or "error")
+        return plain_text(message)
+    if isinstance(error, str):
+        return plain_text(error)
+    return None

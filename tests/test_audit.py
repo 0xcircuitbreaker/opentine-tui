@@ -52,7 +52,7 @@ def test_keygen_never_writes_through_a_symlink(service, tmp_path: Path):
     link.symlink_to(victim)
 
     for force in (False, True):
-        result = service.keygen(link, force=force)
+        result = service.keygen(link, force=force, passphrase="correct horse")
         assert not result.ok
     assert victim.read_text(encoding="utf-8") == "untouched"
 
@@ -63,7 +63,7 @@ def test_forced_keygen_over_a_world_readable_file_is_private_from_the_start(serv
     key.write_text("old\n", encoding="utf-8")
     key.chmod(0o644)
 
-    result = service.keygen(key, force=True)
+    result = service.keygen(key, force=True, passphrase="correct horse")
 
     assert result.ok, result.message
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
@@ -158,13 +158,14 @@ def test_rewind_without_a_step_targets_before_the_run(service, tmp_path: Path):
 
 def test_tagging_a_v4_file_keeps_it_v4_even_with_the_v2_writer_pinned(service, monkeypatch):
     path = service.repository.save(_run())
-    assert service.repository.inspect_path(path).is_v4
+    before = service.repository.inspect_path(path)
+    assert before.is_v4  # the v4 family: tine-artifact/4 or its v5 spelling
     monkeypatch.setenv("OPENTINE_FORMAT", "2")
 
-    result = service.set_tags(service.repository.inspect_path(path), ["x"], [])
+    result = service.set_tags(before, ["x"], [])
 
     assert result.ok, result.message
-    assert service.repository.inspect_path(path).on_disk_version == 4
+    assert service.repository.inspect_path(path).on_disk_version == before.on_disk_version
 
 
 # -- resume reports a dropped signature ---------------------------------------

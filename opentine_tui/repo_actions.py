@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from opentine_tui.actions import ActionResult
-from opentine_tui.cli_bridge import arg_path, run_tine
+from opentine_tui.cli_bridge import arg_path, cli_error, run_tine
 from opentine_tui.formatting import cost_str, duration_str, short_ref
 from opentine_tui.repository import is_v4_artifact, read_raw
 from opentine_tui.v3 import REPO_ERRORS, RepoRunRecord, V3Repository, short_oid
@@ -242,7 +242,9 @@ class RepoActionService:
         payload = result.json()
         if not result.ok or not isinstance(payload, dict):
             return ActionResult(
-                False, "Import refused", result.text or f"tine exited {result.returncode}"
+                False,
+                "Import refused",
+                cli_error(payload) or result.text or f"tine exited {result.returncode}",
             )
         root = str(payload.get("root") or "?")
         return ActionResult(

@@ -556,11 +556,15 @@ class HarnessOptionsModal(_Dialog):
         title: str = "Harness options",
         default_prompt: str = "",
         default_cwd: str = "",
+        recorded_prompt: str = "",
     ) -> None:
         super().__init__()
         self.title_text = title
         self.default_prompt = default_prompt
         self.default_cwd = default_cwd
+        # The prompt stored in the artifact being replayed. Since opentine 0.35 a
+        # replay never sends it on its own: it came from the file, not the user.
+        self.recorded_prompt = recorded_prompt
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="harness-dialog"):
@@ -602,6 +606,15 @@ class HarnessOptionsModal(_Dialog):
             with Horizontal(classes="toggle"):
                 yield Switch(value=False, id="login")
                 yield Label("Pass the login environment through to the harness")
+            if self.recorded_prompt:
+                preview = self.recorded_prompt.replace("\n", " ")
+                if len(preview) > 160:
+                    preview = preview[:159] + "…"
+                yield Static(f"[dim]Recorded prompt:[/] {escape_markup(preview)}")
+                yield from _toggle(
+                    "Send the recorded prompt — I vouch for it (it came from the file)",
+                    "trust_recorded",
+                )
             yield Static("", id="harness-error")
             with Horizontal(id="harness-actions"):
                 yield Button("Cancel", id="cancel")
@@ -638,7 +651,14 @@ class HarnessOptionsModal(_Dialog):
         if timeout is not None and not timeout > 0:
             self.query_one("#harness-error", Static).update("Timeout must be positive.")
             return None
+        trust = bool(self.recorded_prompt) and self.query_one("#trust_recorded", Switch).value
+        if trust and self._input_value("#prompt"):
+            self.query_one("#harness-error", Static).update(
+                "Type a prompt or send the recorded one, not both."
+            )
+            return None
         data: dict[str, Any] = {
+            "trust_recorded_prompt": trust,
             "timeout_seconds": timeout,
             "harness": str(self.query_one("#harness", Select).value or "codex"),
             "prompt": self._input_value("#prompt"),
@@ -768,7 +788,7 @@ class BudgetModal(_Dialog):
 
 
 _HMAC_FIELDS = ("#key_env", "#key_file")
-_ED25519_FIELDS = ("#ed_key_file",)
+_ED25519_FIELDS = ("#ed_key_file", "#passphrase")
 
 
 class SignModal(_Dialog):
@@ -789,6 +809,13 @@ class SignModal(_Dialog):
             yield Input(placeholder="path", id="key_file", name="HMAC key file")
             yield Label("Ed25519 private key file", classes="field-label ed25519")
             yield Input(placeholder="path", id="ed_key_file", name="Ed25519 key file")
+            yield Label("Key passphrase", classes="field-label ed25519")
+            yield Input(
+                placeholder="for an encrypted key (blank: $OPENTINE_KEY_PASSPHRASE)",
+                password=True,
+                id="passphrase",
+                name="Key passphrase",
+            )
             yield from _field("Key id", Input(placeholder="optional", id="key_id"))
             yield from _field(
                 "Signer label", Input(placeholder="optional, display only", id="signer")
@@ -838,6 +865,7 @@ class SignModal(_Dialog):
                 self._error("Ed25519 signing needs a private key file.")
                 return
             key_env = key_file = None  # hidden fields never leak into the request
+            passphrase = self.query_one("#passphrase", Input).value or None
         else:
             if key_env and key_file:
                 self._error("Give the HMAC key as an env var or a file, not both.")
@@ -846,6 +874,7 @@ class SignModal(_Dialog):
                 self._error("HMAC signing needs a key: an env var or a file.")
                 return
             ed_file = None
+            passphrase = None
         self.dismiss(
             SignOptions(
                 algorithm=algorithm,
@@ -857,7 +886,73 @@ class SignModal(_Dialog):
                 save_path=self._value("#save_path") or None,
                 force=self._switch("#force"),
                 overwrite=self._switch("#overwrite"),
+                passphrase=passphrase,
             )
+        )
+
+
+class KeygenModal(_Dialog):
+    """``tine keygen``: an encrypted Ed25519 key by default (opentine 0.41)."""
+
+    DEFAULT_CSS = _DIALOG_CSS % {"name": "KeygenModal"}
+
+    def __init__(self, default_path: str = "opentine_ed25519.key", encrypt_only: bool = False):
+        super().__init__()
+        self.default_path = default_path
+        # Reused for "encrypt an existing plaintext key": same fields, no toggles.
+        self.encrypt_only = encrypt_only
+
+    def compose(self) -> ComposeResult:
+        title = "Encrypt a plaintext key" if self.encrypt_only else "Generate an Ed25519 keypair"
+        with VerticalScroll(id="dialog"):
+            yield Label(f"[bold #FF6900]{title}[/]")
+            yield Static(
+                "[dim]Encrypted PKCS#8 (AES-256). The passphrase is used here and "
+                "never stored or shown; blank uses $OPENTINE_KEY_PASSPHRASE.[/]"
+            )
+            yield from _field(
+                "Private key file" if not self.encrypt_only else "Key file to encrypt",
+                Input(value=self.default_path, id="path"),
+            )
+            yield from _field("Passphrase", Input(password=True, id="passphrase"))
+            yield from _field("Repeat passphrase", Input(password=True, id="repeat"))
+            if not self.encrypt_only:
+                yield from _toggle(
+                    "Unencrypted — legacy plaintext hex (deprecated, not recommended)",
+                    "unencrypted",
+                )
+                yield from _toggle("Replace an existing key file", "force")
+            yield Static("", id="dialog-error")
+            with Horizontal(id="dialog-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button(
+                    "Encrypt" if self.encrypt_only else "Generate", id="ok", variant="primary"
+                )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ok":
+            self.dismiss(None)
+            return
+        path = self._value("#path")
+        if not path:
+            self._error("A key file path is required.")
+            return
+        passphrase = self.query_one("#passphrase", Input).value
+        repeat = self.query_one("#repeat", Input).value
+        unencrypted = False if self.encrypt_only else self._switch("#unencrypted")
+        if passphrase != repeat:
+            self._error("The passphrases do not match.")
+            return
+        if unencrypted and passphrase:
+            self._error("An unencrypted key takes no passphrase; clear one or the other.")
+            return
+        self.dismiss(
+            {
+                "path": path,
+                "passphrase": passphrase or None,
+                "unencrypted": unencrypted,
+                "force": False if self.encrypt_only else self._switch("#force"),
+            }
         )
 
 

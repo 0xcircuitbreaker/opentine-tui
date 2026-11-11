@@ -12,7 +12,8 @@ from typing import Any
 
 from opentine.core import Run, Step
 
-from opentine_tui.cli_bridge import arg_path, run_tine
+from opentine_tui import keys
+from opentine_tui.cli_bridge import arg_path, cli_error, run_tine
 from opentine_tui.formatting import short_ref
 from opentine_tui.repository import (
     ARTIFACT_V4_VERSION,
@@ -79,6 +80,9 @@ class HarnessOptions:
     # None keeps opentine's own bound (an hour); a harness that hangs otherwise
     # holds a worker thread for as long as the dashboard is open.
     timeout_seconds: float | None = None
+    # A replay sends the run's recorded prompt only when the user vouches for it
+    # (`tine replay --trust-recorded-prompt`, opentine 0.35).
+    trust_recorded_prompt: bool = False
 
 
 @dataclass(slots=True)
@@ -114,6 +118,9 @@ class SignOptions:
     save_path: str | None = None
     force: bool = False  # sign despite a failed integrity check
     overwrite: bool = False  # replace an existing destination file
+    # For an encrypted Ed25519 key (0.41+). Never logged, never shown, never
+    # passed to a child process; OPENTINE_KEY_PASSPHRASE is the fallback.
+    passphrase: str | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -157,8 +164,8 @@ def _redacts(tags: list[str]) -> bool:
         return False
 
 
-def _write_private(target: Path, text: str, mode: int) -> None:
-    """Write ``text`` to ``target`` atomically, created at ``mode`` from the start.
+def _write_private(target: Path, data: bytes, mode: int) -> None:
+    """Write ``data`` to ``target`` atomically, created at ``mode`` from the start.
 
     A fresh ``mkstemp`` file (0600, ``O_EXCL``, never a symlink) in the same
     directory is filled and then renamed over the target. Opening the target
@@ -169,8 +176,8 @@ def _write_private(target: Path, text: str, mode: int) -> None:
 
     descriptor, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         temp = Path(temp_name)
@@ -625,6 +632,7 @@ class RunActionService:
         integrity = record.integrity
         if integrity is not None and not integrity.ok and not options.force:
             return _fail("Sign blocked", "Integrity check failed; re-run with Force.", record.path)
+        self._plaintext_key = False
         try:
             key = self._resolve_sign_key(options)
             out = Path(options.save_path).expanduser() if options.save_path else record.path
@@ -655,7 +663,13 @@ class RunActionService:
         return ActionResult(
             True,
             "Signed",
-            f"Signed with {options.algorithm}\nSaved: {saved}{migr}",
+            f"Signed with {options.algorithm}\nSaved: {saved}{migr}"
+            + (
+                "\nThe key file is plaintext hex (deprecated since opentine 0.41): "
+                "encrypt it with ctrl+k."
+                if getattr(self, "_plaintext_key", False)
+                else ""
+            ),
             run=run,
             path=saved,
             refresh=True,
@@ -709,7 +723,18 @@ class RunActionService:
         title = "Signature verified" if result.ok else f"Signature {result.state}"
         return ActionResult(result.ok, title, message, path=record.path)
 
-    def keygen(self, out_path: str | Path, force: bool = False) -> ActionResult:
+    def keygen(
+        self,
+        out_path: str | Path,
+        force: bool = False,
+        passphrase: str | None = None,
+        unencrypted: bool = False,
+    ) -> ActionResult:
+        """``tine keygen``: an encrypted PKCS#8 key by default (opentine 0.41).
+
+        ``unencrypted`` writes the deprecated plaintext-hex form, as
+        ``--unencrypted`` does; it must be asked for, never fallen back to.
+        """
         if signing is None or not getattr(signing, "HAS_ED25519", False):
             return _fail("Keygen unavailable", "Ed25519 needs: pip install opentine[crypto]")
         out = Path(out_path).expanduser()
@@ -726,17 +751,39 @@ class RunActionService:
                     "Keygen refused", f"{target} is a symbolic link; refusing to follow it."
                 )
         try:
-            private_hex, public_hex = signing.generate_ed25519()
+            private_bytes, public_hex = keys.generate(passphrase, unencrypted=unencrypted)
+        except keys.KeyError_ as exc:
+            return _fail("Keygen refused", str(exc))
+        try:
             out.parent.mkdir(parents=True, exist_ok=True)
-            _write_private(out, private_hex + "\n", 0o600)
-            _write_private(pub, public_hex + "\n", 0o644)
+            _write_private(out, private_bytes, 0o600)
+            _write_private(pub, (public_hex + "\n").encode(), 0o644)
         except Exception as exc:
             return ActionResult(False, "Keygen failed", f"{type(exc).__name__}: {exc}")
+        form = (
+            "PLAINTEXT hex (deprecated — anyone who can read the file can sign as you)"
+            if unencrypted
+            else "encrypted PKCS#8 (AES-256)"
+        )
         return ActionResult(
             True,
             "Key generated",
-            f"private: {out} (chmod 0600 — keep secret)\npublic: {pub}\npublic key: {public_hex}",
+            f"private: {out} (0600, {form})\npublic: {pub}\npublic key: {public_hex}",
         )
+
+    def encrypt_key(self, path: str | Path, passphrase: str | None) -> ActionResult:
+        """``tine key encrypt``: rewrite a plaintext-hex key as encrypted PKCS#8."""
+        target = Path(path).expanduser()
+        if target.is_symlink():
+            return _fail("Encrypt refused", f"{target} is a symbolic link; refusing to follow it.")
+        try:
+            data = keys.encrypt_existing(target, passphrase)
+            _write_private(target, data, 0o600)
+        except keys.KeyError_ as exc:
+            return _fail("Encrypt refused", str(exc))
+        except Exception as exc:
+            return _fail("Encrypt failed", f"{type(exc).__name__}: {exc}")
+        return ActionResult(True, "Key encrypted", f"{target} is now encrypted PKCS#8 (0600).")
 
     def _resolve_sign_key(self, options: SignOptions) -> Any:
         if signing is None:
@@ -748,7 +795,9 @@ class RunActionService:
                 raise ValueError("ed25519 unavailable — pip install opentine[crypto]")
             if not options.ed25519_key_file:
                 raise ValueError("ed25519 signing requires a private key file")
-            return signing.ed25519_private_from_file(options.ed25519_key_file)
+            loaded = keys.load_signing_key(options.ed25519_key_file, options.passphrase)
+            self._plaintext_key = loaded.plaintext
+            return loaded.signer
         if options.key_env:
             return signing.hmac_key_from_env(options.key_env)
         if options.key_file:
@@ -868,9 +917,17 @@ class RunActionService:
         step_ref: str | None,
         options: HarnessOptions,
     ) -> ActionResult:
-        task = options.prompt or run.user_prompt
+        # opentine 0.35: the recorded prompt is data from the artifact, and a
+        # replay used to forward it to an agent CLI unasked. It is sent only when
+        # the user vouches for it; otherwise a prompt has to be typed.
+        task = options.prompt or (run.user_prompt if options.trust_recorded_prompt else "")
         if not task:
-            return ActionResult(False, "Harness rejected", "Prompt is required.")
+            return ActionResult(
+                False,
+                "Harness rejected",
+                "Type a prompt, or turn on 'send the recorded prompt' to vouch for the "
+                "one stored in the run.",
+            )
         if OpentineHarness is None:
             return ActionResult(
                 False,
@@ -907,6 +964,10 @@ class RunActionService:
     def _tine(self, title: str, argv: list[str]) -> tuple[Any, ActionResult | None]:
         result = run_tine(argv, env=self._child_env())
         payload = result.json() if "--json" in argv else None
+        message = cli_error(payload)
+        if message is not None:
+            # opentine 0.36: under --json a failure is {"error": {code, message}}.
+            return None, _fail(title, message)
         if payload is None and not result.ok:
             return None, _fail(title, result.text or f"tine exited {result.returncode}")
         return (payload if payload is not None else result), None
@@ -1124,12 +1185,32 @@ _OUTCOME_GLYPHS = {
 }
 
 
+#: opentine's assurance tiers (`opentine._assurance`), in words.
+ASSURANCE_TIERS = {
+    "T0": "self-reported (the agent's own transcript)",
+    "T1": "hook-captured, turn by turn",
+    "T2": "witnessed and signed by a proxy key",
+    "T3": "witnessed, plus an RFC 3161 timestamp",
+}
+
+
 def verify_report_text(report: dict[str, Any]) -> str:
-    """Render a ``tine-verify-report/1`` as rows the panel can show."""
+    """Render a ``tine-verify-report/1`` or ``/2`` as rows the panel can show."""
     lines = [
         f"verdict: {report.get('verdict', '?')}" + ("  (strict)" if report.get("strict") else ""),
-        "",
     ]
+    assurance = report.get("assurance")
+    if isinstance(assurance, dict):
+        # opentine 0.39: how much of the run something other than the agent saw.
+        verified = str(assurance.get("verified", "?"))
+        claimed = str(assurance.get("claimed", "?"))
+        lines.append(
+            f"assurance: {verified} verified"
+            + (f" (claims {claimed})" if claimed != verified else "")
+            + f" — {ASSURANCE_TIERS.get(verified, 'unknown tier')}"
+        )
+        lines += [f"    {reason}" for reason in (assurance.get("reasons") or [])[:4]]
+    lines.append("")
     for check in report.get("checks") or []:
         if not isinstance(check, dict):
             continue

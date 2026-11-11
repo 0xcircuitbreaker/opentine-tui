@@ -29,6 +29,11 @@ try:
 except Exception:  # pragma: no cover - defensive
     Budget = None
 
+try:  # 0.39: assurance tiers (what captured the run, as the run claims it)
+    from opentine._assurance import claimed_tier
+except Exception:  # pragma: no cover - opentine < 0.39
+    claimed_tier = None
+
 try:  # 0.4.0: a fork can prove its own id from the basis it records
     from opentine._fork_identity import verify_fork_id
 except Exception:  # pragma: no cover - pre-0.4.0 opentine
@@ -120,6 +125,16 @@ def _section(title: str, color: str, value: Any, expanded: bool) -> list[str]:
     if hidden:
         out.append(f"[dim]... {hidden} {TRUNCATION_MARKER}[/]")
     return out
+
+
+def _claimed_tier(run: Run) -> str | None:
+    """The assurance tier a run claims for its capture (opentine 0.39+)."""
+    if claimed_tier is None:
+        return None
+    try:
+        return str(claimed_tier(run))
+    except Exception:  # an odd capture record must not break the panel
+        return None
 
 
 class StepDetail(Static):
@@ -425,6 +440,12 @@ class StepDetail(Static):
             out.append(
                 f"\n[bold]File originals:[/] {len(originals)} stored "
                 "[dim](exact rewind available — press 'w')[/]"
+            )
+        tier = _claimed_tier(run)
+        if tier:
+            out.append(
+                f"\n[bold]Assurance:[/] claims {escape(tier)} "
+                "[dim](the run's own word — press 'V' for the verified tier)[/]"
             )
         warnings = metadata.get("warnings")
         if isinstance(warnings, list) and warnings:

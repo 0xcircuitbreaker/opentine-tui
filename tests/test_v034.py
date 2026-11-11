@@ -51,8 +51,10 @@ def test_a_compressed_v4_artifact_is_read_not_reported_corrupt(service, monkeypa
     record = service.repository.inspect_path(path)
 
     assert not record.is_corrupt, record.error_message
-    assert record.on_disk_version == 4
-    assert record.version_label == "v4"
+    # opentine 0.42+ writes the v5 spelling of a v4 document by default.
+    assert record.on_disk_version == 5
+    assert record.version_label == "v5"
+    assert record.is_v4
     assert record.integrity.ok
     assert not record.can_upgrade
 

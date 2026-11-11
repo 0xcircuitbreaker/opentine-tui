@@ -41,6 +41,7 @@ from opentine_tui.dialogs import (
     GotoRunModal,
     HarnessOptionsModal,
     ImportModal,
+    KeygenModal,
     MigrateModal,
     PromoteModal,
     SearchModal,
@@ -270,7 +271,20 @@ class OpentineTUI(App):
             tooltip="Upgrade a v1/v2/legacy artifact to format v4 (original kept)",
         ),
         Binding("s", "sign", "Sign", show=False, tooltip="Sign a completed run (HMAC or Ed25519)"),
-        Binding("k", "keygen", "Keygen", show=False, tooltip="Generate an Ed25519 keypair"),
+        Binding(
+            "k",
+            "keygen",
+            "Keygen",
+            show=False,
+            tooltip="Generate an Ed25519 keypair (encrypted with a passphrase)",
+        ),
+        Binding(
+            "ctrl+k",
+            "encrypt_key",
+            "Encrypt key",
+            show=False,
+            tooltip="Encrypt a legacy plaintext-hex private key in place (tine key encrypt)",
+        ),
         Binding(
             "f",
             "fork",
@@ -1027,27 +1041,45 @@ class OpentineTUI(App):
 
     @work
     async def action_keygen(self) -> None:
-        out = await self.push_screen_wait(
-            TextInputModal(
-                "Generate ed25519 keypair",
-                "path for private seed",
-                value="opentine_ed25519.key",
+        options = await self.push_screen_wait(KeygenModal())
+        if options is None:
+            return
+        if options["force"] and not await self._confirm(
+            "Replace an existing private key",
+            "If a key already exists there, overwriting it destroys the only copy of "
+            "that signing identity and makes every artifact signed with it "
+            "permanently unverifiable.",
+            "Overwrite key",
+        ):
+            return
+        if options["unencrypted"] and not await self._confirm(
+            "Write a plaintext private key",
+            "Anyone who can read the file can sign as you. opentine deprecated this "
+            "form in 0.41; prefer a passphrase.",
+            "Write plaintext",
+        ):
+            return
+        self._show_result(
+            await self._run_in_thread(
+                self.actions.keygen,
+                options["path"],
+                options["force"],
+                options["passphrase"],
+                options["unencrypted"],
             )
         )
-        if not out:
+
+    @work
+    async def action_encrypt_key(self) -> None:
+        """``tine key encrypt``: protect a pre-0.41 plaintext-hex key in place."""
+        options = await self.push_screen_wait(KeygenModal(default_path="", encrypt_only=True))
+        if options is None:
             return
-        result = self.actions.keygen(out)
-        if not result.ok and "already exists" in result.message:
-            if not await self._confirm(
-                "Replace an existing private key",
-                "Overwriting it destroys the only copy of that signing identity and "
-                "makes every artifact signed with it permanently unverifiable.",
-                "Overwrite key",
-            ):
-                self._show_result(result)
-                return
-            result = self.actions.keygen(out, force=True)
-        self._show_result(result)
+        self._show_result(
+            await self._run_in_thread(
+                self.actions.encrypt_key, options["path"], options["passphrase"]
+            )
+        )
 
     @work
     async def action_fork(self) -> None:
@@ -1201,7 +1233,9 @@ class OpentineTUI(App):
             return
         # Captured now: a poll may repaint the tree while a modal is open.
         step_id = self._selected_step_id
-        options = await self._request_harness_options("Replay with harness")
+        options = await self._request_harness_options(
+            "Replay with harness", offer_recorded_prompt=True
+        )
         if options is None:
             return
         if not await self._confirm(
@@ -1418,13 +1452,16 @@ class OpentineTUI(App):
     async def _confirm(self, title: str, message: str, confirm_label: str = "Confirm") -> bool:
         return bool(await self.push_screen_wait(ConfirmationModal(title, message, confirm_label)))
 
-    async def _request_harness_options(self, title: str) -> HarnessOptions | None:
-        cwd = str(Path.cwd())
-        prompt = ""
-        if self._selected_record and self._selected_record.run:
-            prompt = self._selected_record.run.user_prompt
+    async def _request_harness_options(
+        self, title: str, *, offer_recorded_prompt: bool = False
+    ) -> HarnessOptions | None:
+        # The recorded prompt is never pre-filled: it came from the artifact, and
+        # a field the user merely presses Enter on is not a decision to send it.
+        recorded = ""
+        if offer_recorded_prompt and self._selected_record and self._selected_record.run:
+            recorded = self._selected_record.run.user_prompt or ""
         return await self.push_screen_wait(
-            HarnessOptionsModal(title=title, default_prompt=prompt, default_cwd=cwd)
+            HarnessOptionsModal(title=title, default_cwd=str(Path.cwd()), recorded_prompt=recorded)
         )
 
     async def _run_in_thread(self, func, *args) -> ActionResult:
